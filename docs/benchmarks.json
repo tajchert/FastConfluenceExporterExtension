@@ -68,7 +68,7 @@
   ],
   "extensionFootnote": "cwiki.apache.org (Data Center) and uconn.atlassian.net (Cloud), anonymous; Markdown includes downloading the images.",
   "extensionRuns": {
-    "description": "Fast PDF Export v1.1.0 via the live test harness (Playwright Chromium), job start → file saved, milliseconds.",
+    "description": "Fast Confluence Exporter v1.1.0 via the live test harness (Playwright Chromium), job start → file saved, milliseconds.",
     "cwiki COC home 315494566": {
       "pdf": [
         535,

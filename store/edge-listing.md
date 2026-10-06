@@ -34,7 +34,7 @@ npm run zip:edge        # → .output/*-edge.zip
 
 | Field | Value / source |
 |---|---|
-| Display name | `Fast PDF Export for Confluence` (comes from the manifest and must match) |
+| Display name | `Fast Confluence Exporter (PDF & Markdown)` (comes from the manifest and must match) |
 | Short description | The manifest description (115 characters, below Edge's limit) |
 | Description | The *Detailed description* block in [listing.md](listing.md). Edge requires at least 250 characters. The Chrome text qualifies. In the *Good to know* bullet, change "Chrome briefly shows a bar" to "Edge briefly shows a bar". |
 | Store logo | `store/edge-logo-300x300.png` (1:1, 300×300, transparent background) |
@@ -55,7 +55,7 @@ The "debugger" permission is used only to call Page.printToPDF on a tab the exte
 
 ## Edge-specific behavior to be aware of
 
-- The debugging bar in Edge says *"Fast PDF Export for Confluence" started debugging this browser*,
+- The debugging bar in Edge says *"Fast Confluence Exporter (PDF & Markdown)" started debugging this browser*,
   the same as in Chrome. Clicking **Cancel** on it stops the current print.
 - Edge's built-in "Ask where to save each file" setting is respected, the same as in Chrome.
 - Settings sync through the user's Microsoft account if Edge sync is on (`chrome.storage.sync`

@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 const dir = resolve(__dirname, '../../public/_locales');
 
 describe('locale names', () => {
-  it('never lead with the Confluence trademark (nominative "… for Confluence" only)', () => {
+  it('never lead with the Confluence trademark', () => {
     for (const locale of readdirSync(dir)) {
       const messages = JSON.parse(readFileSync(resolve(dir, locale, 'messages.json'), 'utf8')) as Record<string, { message: string }>;
       for (const key of ['extName', 'extShortName']) {

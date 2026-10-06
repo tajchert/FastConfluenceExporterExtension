@@ -1,8 +1,8 @@
-# Privacy Policy: Fast PDF Export for Confluence
+# Privacy Policy: Fast Confluence Exporter
 
 _Last updated: 6 October 2026 (embedded resources disclosed in section 2)_
 
-This policy covers the browser extension "Fast PDF Export for Confluence" (the "extension") for
+This policy covers the browser extension "Fast Confluence Exporter" (the "extension") for
 Google Chrome, Microsoft Edge and other Chromium-based browsers.
 
 **Short version: the extension does not collect, transmit, sell or share any of your data. Everything happens on your own device.**

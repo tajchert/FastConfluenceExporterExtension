@@ -49,7 +49,7 @@ async function unreachable(site: SiteInfo): Promise<string | null> {
   if (process.env.LIVE_SKIP?.split(',').includes(new URL(site.origin).hostname)) return 'skipped by LIVE_SKIP';
   try {
     const res = await fetch(`${site.baseUrl}/rest/api/space?limit=1`, {
-      headers: { Accept: 'application/json', 'User-Agent': 'confluence-fast-pdf-export live tests' },
+      headers: { Accept: 'application/json', 'User-Agent': 'fast-confluence-exporter live tests' },
       signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) return `HTTP ${res.status}`;

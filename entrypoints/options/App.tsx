@@ -133,7 +133,7 @@ export function App(): JSX.Element {
         </span>
         <div>
           <h1>Settings</h1>
-          <div class="page-sub">Fast PDF Export for Confluence</div>
+          <div class="page-sub">Fast Confluence Exporter</div>
         </div>
       </header>
 

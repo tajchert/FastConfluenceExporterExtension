@@ -6,6 +6,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the extension to **Fast Confluence Exporter (PDF & Markdown)** (short: "Fast Confluence Exporter"; previously "Fast PDF Export for Confluence"). PDF metadata (Creator) and generated-by lines use the new name; store images and screenshots updated.
+
 ## [1.1.0] - 2026-10-07
 
 ### Added

@@ -17,7 +17,7 @@ Deeper references (read only when you need them):
 
 ## 1. What this is (60-second version)
 
-**Fast PDF Export for Confluence** — a Chrome/Edge/Brave **Manifest V3 extension** that exports
+**Fast Confluence Exporter** — a Chrome/Edge/Brave **Manifest V3 extension** that exports
 Confluence pages to **PDF** (default), **Markdown** or **plain text**, entirely in the browser,
 using the user's existing Confluence session (or anonymously on public sites).
 
@@ -101,7 +101,7 @@ ships in the store package, must be MIT/BSD/Apache-compatible and appear in
 npm ci                         # install (postinstall runs `wxt prepare` → .wxt/ types)
 npm run dev                    # WXT dev mode: opens a fresh Chrome profile with HMR (you must log in to Confluence there)
 npm run build                  # production build → .output/chrome-mv3/
-npm run zip                    # store package → .output/confluence-fast-pdf-export-<version>-chrome.zip
+npm run zip                    # store package → .output/fast-confluence-exporter-<version>-chrome.zip
 npm run zip:edge               # Edge package
 npm run compile                # type check (Vitest does NOT type-check — always run this too)
 npm test                       # all unit tests (~1–2 s)
@@ -410,7 +410,7 @@ Filenames: `buildFilename({ spaceKey, title, date, ext })` (`lib/util/filename.t
 `{SPACE}_{Title}_{YYYY-MM-DD}.{pdf|zip|md|txt}` (local date, Windows-safe, ≤ 150 chars).
 
 PDF metadata: Title = root title, Author = user display name (if known), Subject =
-`Confluence export: {space} – {n} pages`, Creator = `Fast PDF Export for Confluence v{version}`
+`Confluence export: {space} – {n} pages`, Creator = `Fast Confluence Exporter v{version}`
 (`PRODUCT_NAME` in `runner.ts`).
 
 ### 7.3 Job state, progress and the UI

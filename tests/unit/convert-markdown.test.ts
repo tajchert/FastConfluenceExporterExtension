@@ -130,7 +130,7 @@ describe('convertPages (markdown) — combined file', () => {
     expect(text.startsWith('---\ntitle: "Checkout v3"\n')).toBe(true);
     expect(text).toContain('source: "https://acme.atlassian.net/wiki/spaces/ENG/pages/100"\nspace: "ENG"');
     expect(text).toContain('exported: "2026-10-06T08:30:00.000Z"\nexported_by: "Jane Doe"\npages: 3\n');
-    expect(text).toContain('generator: "Fast PDF Export for Confluence v1.0.0"\n---');
+    expect(text).toContain('generator: "Fast Confluence Exporter v1.0.0"\n---');
     expect(text).toContain(
       [
         '**Contents**',

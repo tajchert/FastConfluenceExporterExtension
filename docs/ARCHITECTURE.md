@@ -422,7 +422,7 @@ export function sanitizePageHtml(html: string, ctx: SanitizeContext): DocumentFr
 export interface AssembleInput {
   pages: { ref: PageRef; body?: PageBody; info?: FetchedPageInfo; live?: boolean }[]; // in order
   allPages: PageRef[]; site: SiteInfo; options: ExportOptions;
-  cover: CoverInfo | null; toc: boolean; generatedBy: string; // "Fast PDF Export for Confluence v1.0.0"
+  cover: CoverInfo | null; toc: boolean; generatedBy: string; // "Fast Confluence Exporter v1.0.0"
   excludeIds?: string[]; // ids of allPages not in the final PDF (left out of TOC, links stay external;
                          // their children take their place in the TOC hierarchy)
 }

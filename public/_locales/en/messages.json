@@ -1,6 +1,6 @@
 {
-  "extName": {"message": "Fast PDF Export for Confluence"},
-  "extShortName": {"message": "Fast PDF Export"},
+  "extName": {"message": "Fast Confluence Exporter (PDF & Markdown)"},
+  "extShortName": {"message": "Fast Exporter"},
   "extDescription": {"message": "Export Confluence pages, page trees, folders and linked pages to one clean PDF, Markdown or text file, right in your browser."},
   "actionTitle": {"message": "Export to PDF, Markdown or text"},
   "commandExportCurrent": {"message": "Export the current Confluence page (default format)"},

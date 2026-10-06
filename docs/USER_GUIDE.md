@@ -1,6 +1,6 @@
 # User guide
 
-Everything about using **Fast PDF Export for Confluence**: export modes, formats, options, permissions,
+Everything about using **Fast Confluence Exporter**: export modes, formats, options, permissions,
 limitations and troubleshooting. For a short overview see the [README](../README.md).
 
 > "Confluence" is a trademark of Atlassian. This extension is not affiliated with or endorsed by Atlassian.
@@ -183,8 +183,8 @@ The extension does **not** request the `tabs`, `cookies`, `history`, `webRequest
 
 ## Limitations
 
-- **Debugger banner.** While a PDF is printing, Chrome shows a bar saying that *"Fast PDF Export
-  for Confluence" started debugging this browser*. It goes away when printing is done. This is how
+- **Debugger banner.** While a PDF is printing, Chrome shows a bar saying that *"Fast Confluence Exporter (PDF & Markdown)"
+  started debugging this browser*. It goes away when printing is done. This is how
   Chrome signals `chrome.debugger` use and the extension can't hide it. Do not click "Cancel" on
   the bar during an export, because that stops the print. Markdown and text exports never show it.
 - **Diagrams from Connect/Forge apps** (draw.io, Gliffy, Lucidchart, charts, roadmaps and similar)

@@ -2,7 +2,7 @@
   <img src="public/icons/icon.svg" width="88" height="88" alt="">
 </p>
 
-<h1 align="center">Fast PDF Export for Confluence</h1>
+<h1 align="center">Fast Confluence Exporter</h1>
 
 <p align="center">
   <strong>Export Confluence pages, page trees and whole spaces into one clean PDF, Markdown or text file, in seconds, right in your browser.</strong>
@@ -25,7 +25,7 @@ Confluence's built-in PDF export runs as a queued job on the server: **about 25 
 page** in our measurements, and **one page at a time**. Exporting a 6-page section means six exports
 and almost 3 minutes of waiting, ending with six separate files.
 
-Fast PDF Export builds the document **in your browser**, from the pages you can already see:
+Fast Confluence Exporter builds the document **in your browser**, from the pages you can already see:
 
 - **Fast.** One page in a few seconds, a whole page tree in one go: **~7× faster** for a page and
   **~40× faster** for a 6-page section (measurements below).
@@ -60,7 +60,7 @@ Fast PDF Export builds the document **in your browser**, from the pages you can 
 Measured on 2026-10-07 in Chrome 154 on macOS. Raw numbers: [docs/benchmarks.json](docs/benchmarks.json);
 charts: `node scripts/readme-charts.mjs`.
 
-| | Confluence built-in | Fast PDF Export |
+| | Confluence built-in | Fast Confluence Exporter |
 |---|---|---|
 | 1 page with images | 25.6 s (24.5 / 25.6 / 26.0) | 3.6 s PDF · 3.0 s Markdown |
 | 1 text page with a Jira table | 24.1 s (24.0 / 24.1 / 24.9) | n/a |
@@ -70,7 +70,7 @@ charts: `node scripts/readme-charts.mjs`.
   Confluence's export job reports `SUCCEEDED` (the download itself not included). Cloud has no
   built-in way to put a page tree into one PDF short of a space export, so the tree is six
   single-page exports in a row.
-- **Fast PDF Export:** the opt-in live test harness (`npm run test:live`, Playwright's Chromium)
+- **Fast Confluence Exporter:** the opt-in live test harness (`npm run test:live`, Playwright's Chromium)
   against the public sites [cwiki.apache.org](https://cwiki.apache.org/confluence) (Data Center)
   and [uconn.atlassian.net](https://uconn.atlassian.net/wiki/spaces/AI/overview) (Cloud), as an
   anonymous visitor, from starting the export until the file is saved. Median of 3 runs.

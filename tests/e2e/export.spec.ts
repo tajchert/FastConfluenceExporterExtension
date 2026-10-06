@@ -94,7 +94,7 @@ test('(a) current page → one PDF: metadata, outline, anchors, images, read-onl
   expect(pdf.getPageCount()).toBe(job.result!.sheetCount);
   expect(pdf.getTitle()).toBe('Architecture Overview');
   expect(pdf.getAuthor()).toBe('Erin Example');
-  expect(pdf.getCreator()).toMatch(/^Fast PDF Export for Confluence v\d/);
+  expect(pdf.getCreator()).toMatch(/^Fast Confluence Exporter v\d/);
   expect(pdf.getSubject()).toContain('TEST');
   expect(pdf.getKeywords()).toContain('Confluence');
 

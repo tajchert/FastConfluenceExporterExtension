@@ -27,7 +27,7 @@ const NODESTS = fx('chrome-nodests.pdf');
 const LIVE = fx('chrome-live.pdf');
 const GAMMA_TITLE = 'Zażółć gęślą jaźń — “quotes”';
 
-const META = { title: 'Export', creator: 'Fast PDF Export for Confluence v1.0.0' };
+const META = { title: 'Export', creator: 'Fast Confluence Exporter v1.0.0' };
 
 /** Link annotations of a page: named dest name, or explicit dest page index, or URI. */
 async function linksOf(bytes: Uint8Array) {

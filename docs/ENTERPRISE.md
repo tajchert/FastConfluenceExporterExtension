@@ -1,6 +1,6 @@
 # Enterprise deployment
 
-How to roll out **Fast PDF Export for Confluence** to an organization: force-install it, limit it
+How to roll out **Fast Confluence Exporter** to an organization: force-install it, limit it
 to your Confluence sites and configure it with managed policy.
 
 Throughout this document, `<EXTENSION_ID>` is the 32-character ID of the extension in the store

@@ -233,7 +233,7 @@ async function main() {
       frame({
         title: 'Preview the pages, <b>untick</b> what you don’t need',
         subtitle: 'Sidebar order and breadcrumbs, straight from Confluence.',
-        body: windowWith('Fast PDF Export for Confluence — Preview', previewShot),
+        body: windowWith('Fast Confluence Exporter — Preview', previewShot),
       }),
       join(OUT_DIR, '02-preview.png'),
     );
@@ -257,7 +257,7 @@ async function main() {
       frame({
         title: 'One clean PDF, <b>built in your browser</b>',
         subtitle: 'Progress, cancel and a clear summary. No servers, no accounts, no API tokens.',
-        body: windowWith('Fast PDF Export for Confluence — Export', resultShot),
+        body: windowWith('Fast Confluence Exporter — Export', resultShot),
       }),
       join(OUT_DIR, '03-result.png'),
     );
@@ -309,7 +309,7 @@ async function main() {
       frame({
         title: 'Make it <b>yours</b>',
         subtitle: 'Paper size, margins, cover, table of contents, page numbers and custom CSS.',
-        body: windowWith('Fast PDF Export for Confluence — Options', optionsShot),
+        body: windowWith('Fast Confluence Exporter — Options', optionsShot),
       }),
       join(OUT_DIR, '05-options.png'),
     );

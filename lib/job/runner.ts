@@ -32,7 +32,7 @@ import type {
 import { buildFilename, sanitizeFilenamePart } from '../util/filename';
 import { runWorkerOp } from './workerOp';
 
-export const PRODUCT_NAME = 'Fast PDF Export for Confluence';
+export const PRODUCT_NAME = 'Fast Confluence Exporter';
 export const BLOCKED_MESSAGE = 'Blocked by your administrator';
 /** A linked page whose space is unknown cannot be checked against blocked spaces: fail closed. */
 export const UNVERIFIED_SPACE_MESSAGE = "This page's space could not be checked against your administrator's policy.";

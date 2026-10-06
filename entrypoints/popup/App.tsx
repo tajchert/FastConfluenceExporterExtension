@@ -96,7 +96,7 @@ export function App(): JSX.Element {
         <span class="brand-mark" aria-hidden="true">
           <Icon name="pdf" size={16} />
         </span>
-        <span class="app-title">Fast PDF Export</span>
+        <span class="app-title">Fast Confluence Exporter</span>
         <Button variant="ghost" icon="gear" label="Settings" onClick={openOptions} />
       </header>
       {phase.kind === 'loading' || (phase.kind === 'ready' && !settings) ? (

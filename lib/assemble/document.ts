@@ -22,7 +22,7 @@ export interface AssembleInput {
   options: ExportOptions;
   cover: CoverInfo | null;
   toc: boolean;
-  generatedBy: string; // "Fast PDF Export for Confluence v1.0.0"
+  generatedBy: string; // "Fast Confluence Exporter v1.0.0"
   /**
    * Ids from `allPages` that are NOT part of the final PDF (failed / skipped / pruned). They are
    * left out of the TOC and links to them keep pointing at Confluence.

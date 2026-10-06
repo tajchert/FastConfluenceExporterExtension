@@ -26,7 +26,7 @@ import { isAbortError } from '../lib/util/abort';
 import { mapPool } from '../lib/util/pool';
 
 const INSTALLED_FLAG = '__cfpWorkerInstalled';
-const PRODUCT_NAME = 'Fast PDF Export for Confluence';
+const PRODUCT_NAME = 'Fast Confluence Exporter';
 const CONTENT_TYPES = new Set<ContentType>(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed', 'slides']);
 const LINK_ONLY_TYPES = new Set<ContentType>(['folder', 'whiteboard', 'database', 'embed', 'slides']);
 

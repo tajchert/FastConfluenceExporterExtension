@@ -134,7 +134,7 @@ export function convertInput(
     options: { ...DEFAULT_OPTIONS, format: 'markdown', ...options },
     cover: null,
     toc: false,
-    generatedBy: 'Fast PDF Export for Confluence v1.0.0',
+    generatedBy: 'Fast Confluence Exporter v1.0.0',
     separate: false,
     baseName: 'ENG_Checkout v3_2026-10-06',
     ...rest,

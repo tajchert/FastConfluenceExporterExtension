@@ -90,7 +90,7 @@ for (const theme of ['light', 'dark']) {
     subtitle: 'Confluence Cloud built-in export vs. this extension (single pages: median of 3 runs)',
     series: [
       { key: 'builtin', label: 'Confluence built-in export', color: 'orange' },
-      { key: 'ext', label: 'Fast PDF Export', color: 'blue' },
+      { key: 'ext', label: 'Fast Confluence Exporter', color: 'blue' },
     ],
     groups: vs.map((r) => ({
       label: r.label,

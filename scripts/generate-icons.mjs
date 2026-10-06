@@ -137,10 +137,10 @@ function promoHtml({ width, height, large }) {
     <div class="content">
       <div class="icon">${icon}</div>
       <div class="text">
-        <h1>Fast PDF Export<span class="for">for Confluence</span></h1>
+        <h1>Fast Confluence Exporter<span class="for">PDF &amp; Markdown</span></h1>
         <p>${large
-          ? 'Pages, page trees, folders and linked pages in one clean PDF. Generated in your browser, using your existing session.'
-          : 'Pages, trees and folders in one clean PDF, made in your browser.'}</p>
+          ? 'Pages, page trees, folders and whole spaces as one clean PDF or Markdown file. Made in your browser, using your existing session.'
+          : 'Pages, trees and folders as PDF or Markdown, made in your browser.'}</p>
         ${large ? `<div class="chips"><span class="chip">Cover &amp; TOC</span><span class="chip">PDF bookmarks</span><span class="chip">Cloud &amp; Data Center</span><span class="chip">No data leaves your browser</span></div>` : ''}
       </div>
     </div>

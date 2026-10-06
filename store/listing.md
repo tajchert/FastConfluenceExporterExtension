@@ -10,12 +10,12 @@ extension's behavior. Don't advertise anything the extension doesn't do.
 ### Name
 
 ```
-Fast PDF Export for Confluence
+Fast Confluence Exporter (PDF & Markdown)
 ```
 
-The name comes from `public/_locales/en/messages.json` → `extName`. Always use the form
-"… for Confluence". Never "Confluence PDF …" or anything else that suggests an official Atlassian
-product.
+The name comes from `public/_locales/en/messages.json` → `extName` (short form in UI and docs:
+"Fast Confluence Exporter"). The name must never start with "Confluence" or suggest an official
+Atlassian product, and the trademark note below must stay in the description.
 
 ### Summary (short description, ≤ 132 characters)
 
@@ -40,7 +40,7 @@ The dashboard field is plain text, so paste this block as is:
 ```
 Export Confluence pages to PDF in seconds: one page, a whole page tree, a folder, or a page together with everything it links to, as one clean, searchable PDF.
 
-Confluence's built-in PDF export runs on the server and handles one page at a time. Fast PDF Export for Confluence builds the PDF in your browser instead, using the session you are already logged in with.
+Confluence's built-in PDF export runs on the server and handles one page at a time. Fast Confluence Exporter builds the PDF in your browser instead, using the session you are already logged in with.
 
 EXPORT MODES
 • This page: one click, or press Alt+Shift+P
@@ -125,8 +125,8 @@ Regenerate them with `npm run screenshots` after UI changes (see `scripts/store-
 | Field | Value |
 |---|---|
 | Official URL | *(none, or your verified domain)* |
-| Homepage URL | Repository URL, e.g. `https://github.com/<owner>/confluence-fast-pdf-export` |
-| Support URL | Repository issues URL, e.g. `https://github.com/<owner>/confluence-fast-pdf-export/issues` |
+| Homepage URL | Repository URL, e.g. `https://github.com/<owner>/fast-confluence-exporter` |
+| Support URL | Repository issues URL, e.g. `https://github.com/<owner>/fast-confluence-exporter/issues` |
 | Mature content | No |
 
 ---
@@ -222,7 +222,7 @@ Tick all three certifications:
 ### Privacy policy URL
 
 Host [`PRIVACY.md`](../PRIVACY.md) at a public URL, for example
-`https://github.com/<owner>/confluence-fast-pdf-export/blob/main/PRIVACY.md` or a GitHub Pages
+`https://github.com/<owner>/fast-confluence-exporter/blob/main/PRIVACY.md` or a GitHub Pages
 copy, and fill in the contact address placeholder before publishing.
 
 ---
@@ -239,7 +239,7 @@ copy, and fill in the contact address placeholder before publishing.
 ## Trademark note
 
 "Confluence" is a trademark of Atlassian. This extension is not affiliated with or endorsed by
-Atlassian. The name uses the nominative "for Confluence" form. The icon and promo images are
+Atlassian. "Confluence" in the name only describes which product the extension works with. The icon and promo images are
 original artwork (a document, a lightning bolt and a "PDF" tag) and don't use or imitate
 Atlassian logos or brand colors. Keep this sentence at the end of the detailed description and in
 the README.

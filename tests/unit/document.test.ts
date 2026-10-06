@@ -76,7 +76,7 @@ function input(o: Partial<AssembleInput> = {}): AssembleInput {
       siteTitle: 'Acme Wiki',
     },
     toc: true,
-    generatedBy: 'Fast PDF Export for Confluence v1.0.0',
+    generatedBy: 'Fast Confluence Exporter v1.0.0',
     ...o,
   };
 }
@@ -120,7 +120,7 @@ describe('buildPrintDocument', () => {
     expect(cover.querySelector('.cf-cover-title')!.textContent).toBe('Checkout v3');
     expect(cover.textContent).toContain('Acme Wiki');
     expect(cover.textContent).toContain('Sam Exporter');
-    expect(cover.textContent).toContain('Fast PDF Export for Confluence v1.0.0');
+    expect(cover.textContent).toContain('Fast Confluence Exporter v1.0.0');
     expect(cover.querySelector('h1, h2, h3')).toBeNull();
 
     const articles = Array.from(doc.querySelectorAll('article.cf-page'));

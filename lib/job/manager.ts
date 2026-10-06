@@ -403,7 +403,7 @@ function validateRequest(request: ExportRequest): void {
 
 async function requireAccess(site: SiteInfo): Promise<void> {
   if (!(await hasSiteAccess(site.origin))) {
-    throw codedError(`Fast PDF Export needs access to ${new URL(site.origin).host} first.`, 'NO_ACCESS');
+    throw codedError(`Fast Confluence Exporter needs access to ${new URL(site.origin).host} first.`, 'NO_ACCESS');
   }
 }
 

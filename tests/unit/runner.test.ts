@@ -303,7 +303,7 @@ describe('runJob: combined PDF', () => {
       title: 'Root Title',
       author: 'Jane Doe',
       subject: 'Confluence export: ENG – 3 pages',
-      creator: 'Fast PDF Export for Confluence v1.2.3',
+      creator: 'Fast Confluence Exporter v1.2.3',
     });
 
     expect(h.saved[0].filename).toBe('ENG_Root Title_2026-10-06.pdf');
