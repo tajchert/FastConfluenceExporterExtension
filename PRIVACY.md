@@ -63,7 +63,7 @@ processes it **locally in your browser**:
 ## 4. Permissions
 
 The extension asks for browser permissions only to provide its single purpose: exporting
-Confluence pages to PDF. The [README](README.md#permissions) explains each permission.
+Confluence pages to PDF. The [user guide](docs/USER_GUIDE.md#permissions) explains each permission.
 
 ## 5. Data retention and deletion
 

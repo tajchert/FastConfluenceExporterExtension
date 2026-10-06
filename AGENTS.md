@@ -8,7 +8,8 @@ Deeper references (read only when you need them):
   pipeline steps (§3), design decisions (§5). **Update it when you change a contract.**
 - `docs/TESTING.md` — test layers, what each E2E/live test covers, manual QA checklist.
 - `docs/ENTERPRISE.md` — managed policy (Chrome/Edge enterprise install).
-- `README.md` — user-facing features, permissions table, limitations.
+- `README.md` — short project overview (benefits, speed charts, how it works, tech stack).
+- `docs/USER_GUIDE.md` — user-facing features, formats, permissions table, limitations, troubleshooting.
 - `store/listing.md`, `store/edge-listing.md`, `PRIVACY.md` — store/legal text (must stay truthful).
 - `CHANGELOG.md` — Keep a Changelog format; add an entry for user-visible changes.
 
@@ -108,6 +109,7 @@ npm run test:e2e               # build:e2e + Playwright E2E against the mock (~5
 npm run test:live              # build:live + live suite against public sites (~30 s, network)
 npm run screenshots            # regenerate store/screenshots/*.png (needs `pdftoppm` from poppler)
 npm run icons                  # regenerate public/icons/*.png and store promo images
+node scripts/readme-charts.mjs # regenerate README speed charts (docs/images/*.svg) from docs/benchmarks.json
 npm run licenses               # regenerate public/THIRD_PARTY_LICENSES.txt
 npm run check:release          # placeholders + license freshness (fails until <your-email>/<owner> are filled)
 ```
@@ -897,7 +899,7 @@ production manifest check (no `host_permissions`, no localhost) → zip (Chrome 
 6. Consumer: `lib/assemble/document.ts` (PDF) and/or `lib/convert/*` (md/txt); the option reaches
    the worker inside `options` of `worker/assemble` / `worker/convert`.
 7. Tests: `settings.test.ts` (defaults/normalization), unit test of the consumer, E2E if visible
-   in output. Docs: README features, CHANGELOG, `docs/ARCHITECTURE.md` if contracts changed,
+   in output. Docs: docs/USER_GUIDE.md (and README if it is a headline feature), CHANGELOG, `docs/ARCHITECTURE.md` if contracts changed,
    TESTING.md manual checklist if it needs manual QA.
 
 ### Add a worker RPC

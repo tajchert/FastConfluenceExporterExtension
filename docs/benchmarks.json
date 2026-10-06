@@ -1,0 +1,133 @@
+{
+  "measuredOn": "2026-10-07",
+  "browser": "Chrome 154 (macOS)",
+  "comparison": [
+    {
+      "label": "1 page with images",
+      "builtinSec": 25.6,
+      "extensionSec": 3.6,
+      "builtinNote": "",
+      "extensionNote": ""
+    },
+    {
+      "label": "Page tree\n6–7 pages",
+      "builtinSec": 160.1,
+      "extensionSec": 3.6,
+      "builtinNote": "(6 exports, 6 files)",
+      "extensionNote": "(1 PDF)"
+    }
+  ],
+  "comparisonFootnote": "Built-in: a Confluence Cloud site, start → server job SUCCEEDED; the tree is 6 single-page exports.\nExtension: a public Confluence Cloud site, click → saved file.",
+  "builtinRuns": {
+    "description": "Confluence Cloud built-in PDF export (pdfpageexport.action → /api/v2/pdfexporttask/progress until SUCCEEDED), milliseconds, logged-in user, private site (not named).",
+    "singlePageWith10Images": [
+      24505,
+      25597,
+      26004
+    ],
+    "singleTextPageWithJiraTable": [
+      23983,
+      24090,
+      24937
+    ],
+    "pageTreeSixPagesSequential": [
+      23056,
+      18922,
+      20068,
+      19916,
+      20086,
+      58006
+    ]
+  },
+  "extension": [
+    {
+      "label": "Data Center · 1 page",
+      "pdfSec": 0.54,
+      "markdownSec": 0.23
+    },
+    {
+      "label": "Data Center · 1 page\n11 images",
+      "pdfSec": 1.15,
+      "markdownSec": 0.97
+    },
+    {
+      "label": "Data Center · 9-page tree",
+      "pdfSec": 1.9,
+      "markdownSec": 1.17
+    },
+    {
+      "label": "Cloud · 1 page with images",
+      "pdfSec": 3.6,
+      "markdownSec": 2.97
+    },
+    {
+      "label": "Cloud · 7-page tree",
+      "pdfSec": 3.62,
+      "markdownSec": 2.54
+    }
+  ],
+  "extensionFootnote": "cwiki.apache.org (Data Center) and uconn.atlassian.net (Cloud), anonymous; Markdown includes downloading the images.",
+  "extensionRuns": {
+    "description": "Fast PDF Export v1.1.0 via the live test harness (Playwright Chromium), job start → file saved, milliseconds.",
+    "cwiki COC home 315494566": {
+      "pdf": [
+        535,
+        536,
+        2582
+      ],
+      "markdown": [
+        223,
+        230,
+        330
+      ]
+    },
+    "cwiki survey 67635266 (11 images)": {
+      "pdf": [
+        1061,
+        1151,
+        1158
+      ],
+      "markdown": [
+        943,
+        965,
+        1064
+      ]
+    },
+    "cwiki COC home subtree (9 pages)": {
+      "pdf": [
+        1803,
+        1899,
+        2020
+      ],
+      "markdown": [
+        1068,
+        1171,
+        1181
+      ]
+    },
+    "uconn 29030154243 (images)": {
+      "pdf": [
+        3403,
+        3601,
+        3912
+      ],
+      "markdown": [
+        2643,
+        2973,
+        3648
+      ]
+    },
+    "uconn subtree 29081927691 (7 pages)": {
+      "pdf": [
+        3535,
+        3624,
+        3735
+      ],
+      "markdown": [
+        2461,
+        2541,
+        2870
+      ]
+    }
+  }
+}

@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="260" viewBox="0 0 760 260" role="img" aria-label="Time to a finished PDF (lower is better)">
+<title>Time to a finished PDF (lower is better)</title>
+<rect width="760" height="260" rx="12" fill="#1a1a19"/>
+<text x="24" y="32" font-size="17" font-weight="700" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Time to a finished PDF (lower is better)</text>
+<text x="24" y="50" font-size="12.5" fill="#c3c2b7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Confluence Cloud built-in export vs. this extension (single pages: median of 3 runs)</text>
+<rect x="210" y="58" width="12" height="12" rx="3" fill="#d95926"/><text x="228" y="68.5" font-size="12.5" fill="#c3c2b7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Confluence built-in export</text>
+<rect x="436" y="58" width="12" height="12" rx="3" fill="#3987e5"/><text x="454" y="68.5" font-size="12.5" fill="#c3c2b7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Fast PDF Export</text>
+<line x1="210" x2="210" y1="84" y2="196" stroke="#33332f" stroke-width="1"/>
+<text x="210" y="214" text-anchor="middle" font-size="11" fill="#8f8e86" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">0 s</text>
+<line x1="330" x2="330" y1="84" y2="196" stroke="#33332f" stroke-width="1"/>
+<text x="330" y="214" text-anchor="middle" font-size="11" fill="#8f8e86" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">50 s</text>
+<line x1="450" x2="450" y1="84" y2="196" stroke="#33332f" stroke-width="1"/>
+<text x="450" y="214" text-anchor="middle" font-size="11" fill="#8f8e86" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">100 s</text>
+<line x1="570" x2="570" y1="84" y2="196" stroke="#33332f" stroke-width="1"/>
+<text x="570" y="214" text-anchor="middle" font-size="11" fill="#8f8e86" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">150 s</text>
+<line x1="690" x2="690" y1="84" y2="196" stroke="#33332f" stroke-width="1"/>
+<text x="690" y="214" text-anchor="middle" font-size="11" fill="#8f8e86" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">200 s</text>
+<path d="M210,92 h57.44 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-57.44 z" fill="#d95926"/>
+<text x="279.44" y="105.5" font-size="13" font-weight="600" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">26 s</text>
+<path d="M210,112 h4.639999999999986 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-4.639999999999986 z" fill="#3987e5"/>
+<text x="226.64" y="125.5" font-size="13" font-weight="600" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">3.6 s</text>
+<text x="198" y="115.5" text-anchor="end" font-size="13" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">1 page with images</text>
+<path d="M210,152 h380.24 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-380.24 z" fill="#d95926"/>
+<text x="602.24" y="165.5" font-size="13" font-weight="600" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">160 s<tspan font-weight="400" fill="#c3c2b7"> (6 exports, 6 files)</tspan></text>
+<path d="M210,172 h4.639999999999986 a4,4 0 0 1 4,4 v10 a4,4 0 0 1 -4,4 h-4.639999999999986 z" fill="#3987e5"/>
+<text x="226.64" y="185.5" font-size="13" font-weight="600" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">3.6 s<tspan font-weight="400" fill="#c3c2b7"> (1 PDF)</tspan></text>
+<text x="198" y="167.5" text-anchor="end" font-size="13" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Page tree</text>
+<text x="198" y="183.5" text-anchor="end" font-size="13" fill="#c3c2b7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">6–7 pages</text>
+<text x="24" y="230" font-size="11" fill="#8f8e86" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Built-in: a Confluence Cloud site, start → server job SUCCEEDED; the tree is 6 single-page exports.</text>
+<text x="24" y="246" font-size="11" fill="#8f8e86" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">Extension: a public Confluence Cloud site, click → saved file.</text>
+</svg>
