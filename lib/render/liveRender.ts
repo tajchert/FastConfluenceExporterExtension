@@ -1,5 +1,5 @@
 /**
- * Live render (FR-10, spec §8.3): prints pages with client-rendered macros (draw.io, Gliffy,
+ * Live render (FR-10): prints pages with client-rendered macros (draw.io, Gliffy,
  * charts, …) from their real Confluence URL. A small pool of inactive tabs in the source window
  * opens each page, /live.js prepares it (expand macros, hide app chrome, wait for render and
  * network quiet), and the tab is printed with the same parameters as the fast path.

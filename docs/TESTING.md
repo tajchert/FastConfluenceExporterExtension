@@ -121,7 +121,7 @@ Gliffy diagram (if the app is installed), and a page that a second test user can
 - [ ] Deny the prompt from the popup (the popup closes), then within a minute add the same site on the options page: **no** export starts by itself.
 - [ ] Revoking the site on the options page means the next export asks again.
 
-### Acceptance criteria (spec §14, generic)
+### Acceptance criteria
 
 - [ ] **This page:** produces a PDF in **≤ 5 s** (text + about 10 images) with the correct title, images, tables, code blocks and panels, and clickable links. Check on Cloud A, Cloud B and DC.
 - [ ] **This page + children** on a 25-page tree produces **one** PDF with a cover, a clickable TOC in **sidebar order**, each page starting on a new sheet, **bookmarks per page** (nested by depth), and page numbers in the footer. Should take ≤ 30 s.

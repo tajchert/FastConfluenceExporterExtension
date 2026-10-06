@@ -1,7 +1,6 @@
 # Architecture & module contracts
 
-Source of truth for how the extension is put together. The product spec is
-`confluence-pdf-exporter-spec.md` (written for one company's instance); this implementation
+Source of truth for how the extension is put together. The implementation
 is **generic** (any Confluence Cloud site incl. custom domains, plus Data Center / Server via the
 v1 REST API) and **publishable** on the Chrome Web Store (no hard-coded hosts, runtime
 per-origin permission grants, privacy policy, no remote code).
@@ -9,6 +8,32 @@ per-origin permission grants, privacy policy, no remote code).
 Stack: TypeScript, WXT 0.21 (MV3), Preact, pdf-lib, DOMPurify, fflate, Vitest (+happy-dom),
 Playwright (E2E against a mock Confluence). Use the `chrome.*` API (typed by `@types/chrome`),
 not `browser.*`.
+
+## 0. Requirements index
+
+Code comments reference these requirement ids.
+
+| ID | Requirement |
+|---|---|
+| FR-1 | Detect Confluence pages, folders and spaces in the active tab; enable the action there. |
+| FR-2 | Export the current page in one click (popup, keyboard shortcut). |
+| FR-3 | Export a page with all descendants in page-tree order, optional depth limit. |
+| FR-4 | Export a folder recursively in tree order. |
+| FR-5 | Export pages linked from the current page (1 or 2 hops), de-duplicated, cycle-safe. |
+| FR-6 | Manual selection from a lazy page tree with tri-state checkboxes; output in tree order. |
+| FR-7 | Preview the page list before multi-page exports and drop individual pages. |
+| FR-8 | One combined PDF: cover, clickable TOC, each page on a new sheet with a header block. |
+| FR-9 | Content that can't be rendered statically becomes a visible placeholder with a link, never silently dropped. |
+| FR-10 | Live render: print pages with client-rendered macros (diagrams, charts) from the real page. |
+| FR-11 | Optionally one PDF per page, bundled in a ZIP. |
+| FR-12 | Progress (page X of N, current title), cancel, error summary. |
+| FR-13 | PDF options: paper size, orientation, margins, cover, TOC, metadata, comments, page numbers. |
+| FR-14 | Filename `{space-key}_{root-title}_{YYYY-MM-DD}.pdf`, saved via chrome.downloads. |
+| FR-15 | Context menu on Confluence links: export page / page + children. |
+| FR-16 | Large-export guard: warn above 150 pages, require confirmation above 500. |
+
+Non-functional targets: current page ≤ 5 s; 25-page subtree ≤ 30 s; 100 pages ≤ 2 min without a
+tab crash; one failing page never fails the whole export; only GET requests to the Confluence site.
 
 ## 1. Spike findings (verified on a real Confluence Cloud site, 2026-10-06)
 
@@ -461,7 +486,7 @@ Talks to the SW only through `callSw()` from `lib/rpc.ts` and listens for `SwBro
   tabs restored after a browser restart are recognized and closed. The preview's cached helper tab
   closes 2 minutes after its last use, or 5 s after the last extension page (UI port) went away.
 - **Debugger fallback**: if `DebuggerUnavailableError`, activate the worker tab and call
-  `window.print()` there (vector, but needs the print dialog) — spec §17.
+  `window.print()` there (vector, but needs the print dialog).
 - **Permissions**: required `activeTab, scripting, storage, downloads, debugger, notifications,
   contextMenus, offscreen`; `optional_host_permissions: https://*/*, http://*/*` granted per origin.
   No `tabs` permission (not needed: we only read URLs of tabs on granted origins).
