@@ -1,0 +1,38 @@
+{
+  "name": "confluence-fast-pdf-export",
+  "description": "Export one or many Confluence pages into a single, good-looking PDF in seconds, entirely in your browser.",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "dev": "wxt",
+    "dev:edge": "wxt -b edge",
+    "build": "wxt build",
+    "build:e2e": "wxt build --mode e2e --outDir .output-e2e",
+    "zip": "wxt zip",
+    "zip:edge": "wxt zip -b edge",
+    "compile": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "npm run build:e2e && playwright test",
+    "icons": "node scripts/generate-icons.mjs",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "dompurify": "3.4.16",
+    "fflate": "0.8.3",
+    "pdf-lib": "1.17.1",
+    "preact": "11.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@preact/preset-vite": "2.10.6",
+    "@types/chrome": "0.3.4",
+    "@types/node": "26.6.4",
+    "happy-dom": "20.14.5",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3",
+    "wxt": "0.21.4"
+  }
+}
