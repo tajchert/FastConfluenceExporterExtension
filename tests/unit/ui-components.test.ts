@@ -174,4 +174,63 @@ describe('OptionsForm', () => {
     await act(async () => byLabel('Page numbers').click());
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ pageNumbers: false }));
   });
+
+  const labels = () => [...root.querySelectorAll('label')].map((l) => l.textContent ?? '');
+  const has = (text: string) => labels().some((t) => t.startsWith(text));
+
+  it('PDF: layout and PDF-only toggles, "One PDF per page", no image toggle; switching the format', async () => {
+    const onChange = vi.fn();
+    await act(async () => {
+      render(h(OptionsForm, { variant: 'preview', value: { ...DEFAULT_OPTIONS }, onChange }), root);
+    });
+    expect(root.querySelector('legend')?.textContent).toBe('Format');
+    expect(has('Paper size')).toBe(true);
+    expect(has('Page numbers')).toBe(true);
+    expect(has('Live render')).toBe(true);
+    expect(has('One PDF per page (ZIP)')).toBe(true);
+    expect(has('Include images')).toBe(false);
+    const markdown = [...root.querySelectorAll<HTMLInputElement>('input[type="radio"]')].find((r) => r.value === 'markdown')!;
+    await act(async () => markdown.click());
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ format: 'markdown' }));
+  });
+
+  it('Markdown (preview): PDF-only controls hidden with a hint, image toggle shown, cover and TOC kept for separate files', async () => {
+    await act(async () => {
+      render(
+        h(OptionsForm, { variant: 'preview', value: { ...DEFAULT_OPTIONS, format: 'markdown', separateFiles: true }, onChange: vi.fn() }),
+        root,
+      );
+    });
+    expect(has('Paper size')).toBe(false);
+    expect(has('Page numbers')).toBe(false);
+    expect(has('Live render')).toBe(false);
+    expect(has('Fit wide tables')).toBe(false);
+    expect(root.textContent).toContain('apply to PDF only');
+    expect(has('Include images (ZIP)')).toBe(true);
+    expect(has('One file per page (ZIP)')).toBe(true);
+    const byLabel = (text: string) => {
+      const label = [...root.querySelectorAll('label')].find((l) => l.textContent?.startsWith(text))!;
+      return root.querySelector<HTMLInputElement>(`#${CSS.escape(label.htmlFor)}`)!;
+    };
+    expect(byLabel('Cover page').disabled).toBe(false);
+    expect(byLabel('Table of contents').disabled).toBe(false);
+    expect(root.textContent).toContain('Export details at the top of the contents file');
+  });
+
+  it('Text (settings): PDF layout stays editable as the PDF defaults; no image toggle', async () => {
+    await act(async () => {
+      render(h(OptionsForm, { variant: 'settings', value: { ...DEFAULT_OPTIONS, format: 'text' }, onChange: vi.fn() }), root);
+    });
+    expect(root.textContent).toContain('Used when you export as PDF');
+    expect(has('Top')).toBe(true);
+    expect(has('Include images')).toBe(false);
+    // PDF-only toggles sit in the "PDF layout" group, not among the content / output toggles.
+    const pdfGroup = root.querySelector('[aria-label="PDF layout"]')!;
+    const groupLabels = (el: Element) => [...el.querySelectorAll('label')].map((l) => l.textContent ?? '');
+    for (const label of ['Page numbers', 'Fit wide tables', 'Live render']) {
+      expect(groupLabels(pdfGroup).some((t) => t.startsWith(label))).toBe(true);
+      expect(labels().filter((t) => t.startsWith(label))).toHaveLength(1);
+    }
+    expect(groupLabels(root.querySelector('[aria-label="Content"]')!).some((t) => t.startsWith('Page numbers'))).toBe(false);
+  });
 });

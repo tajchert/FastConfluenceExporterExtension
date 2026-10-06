@@ -12,6 +12,7 @@
 import {
   DEFAULT_OPTIONS,
   DEFAULT_SETTINGS,
+  type ExportFormat,
   type ExportOptions,
   type ManagedPolicy,
   type Orientation,
@@ -26,6 +27,7 @@ export const MAX_CUSTOM_CSS_LENGTH = 100_000;
 
 const PAPER_SIZES: readonly PaperSize[] = ['A4', 'Letter', 'Legal', 'A3'];
 const ORIENTATIONS: readonly Orientation[] = ['portrait', 'landscape'];
+export const EXPORT_FORMATS: readonly ExportFormat[] = ['pdf', 'markdown', 'text'];
 
 type Dict = Record<string, unknown>;
 
@@ -64,6 +66,8 @@ export function normalizeOptions(raw: unknown, base: ExportOptions = DEFAULT_OPT
   const m: Dict = isDict(r.marginsMm) ? r.marginsMm : {};
   const css = typeof r.customCss === 'string' ? r.customCss : base.customCss;
   return {
+    format: oneOf(r.format, EXPORT_FORMATS, base.format),
+    downloadImages: bool(r.downloadImages, base.downloadImages),
     paperSize: oneOf(r.paperSize, PAPER_SIZES, base.paperSize),
     orientation: oneOf(r.orientation, ORIENTATIONS, base.orientation),
     marginsMm: {
@@ -130,6 +134,9 @@ export function normalizePolicy(raw: unknown): ManagedPolicy {
  */
 function validPartialOptions(raw: Dict): Partial<ExportOptions> {
   const alt: ExportOptions = {
+    // Any value other than the default's: a valid raw value wins over both bases.
+    format: DEFAULT_OPTIONS.format === 'pdf' ? 'markdown' : 'pdf',
+    downloadImages: !DEFAULT_OPTIONS.downloadImages,
     paperSize: DEFAULT_OPTIONS.paperSize === 'A4' ? 'Letter' : 'A4',
     orientation: DEFAULT_OPTIONS.orientation === 'portrait' ? 'landscape' : 'portrait',
     marginsMm: { top: -1, right: -1, bottom: -1, left: -1 },

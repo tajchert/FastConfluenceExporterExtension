@@ -19,10 +19,10 @@ product.
 
 ### Summary (short description, ≤ 132 characters)
 
-The summary comes from the manifest `description` (`extDescription`, 115 characters):
+The summary comes from the manifest `description` (`extDescription`, 125 characters):
 
 ```
-Export Confluence pages, page trees, folders and linked pages into one clean PDF in seconds, right in your browser.
+Export Confluence pages, page trees, folders and linked pages to one clean PDF, Markdown or text file, right in your browser.
 ```
 
 ### Category
@@ -60,6 +60,12 @@ A PDF YOU CAN ACTUALLY USE
 • Optional: one PDF per page, bundled in a ZIP
 • Optional: custom CSS for your own branding
 
+ALSO AS MARKDOWN OR PLAIN TEXT
+• Pick Markdown (.md) or plain text (.txt) instead of PDF, for one export or as your default
+• Markdown keeps headings, tables, code blocks with their language, task lists, panels and links between the exported pages
+• Images can be bundled with the Markdown in a ZIP, with relative links
+• One file per page in a ZIP works for every format
+
 HANDLES REAL-WORLD PAGES
 • Tables, code blocks, panels, layouts, status lozenges, Jira issue tables and images
 • Expand macros are printed open
@@ -84,7 +90,7 @@ PRIVATE BY DESIGN
 • You can only export what you are already allowed to see.
 
 GOOD TO KNOW
-• While a PDF is being printed, Chrome briefly shows a bar saying the extension "started debugging this browser". This is how Chrome shows that its built-in PDF printer is in use, and the bar disappears as soon as printing finishes.
+• While a PDF is being printed, Chrome briefly shows a bar saying the extension "started debugging this browser". This is how Chrome shows that its built-in PDF printer is in use, and the bar disappears as soon as printing finishes. Markdown and text exports don't print, so the bar doesn't appear for them.
 • Diagrams from Confluence apps need Live render, which is slower.
 
 FOR IT ADMINS
@@ -157,7 +163,7 @@ chrome.storage.sync stores the user's preferences (default paper size, margins, 
 
 **downloads**
 ```
-Saves the generated PDF (or the ZIP of separate PDFs) to the user's downloads folder through chrome.downloads, which respects the user's "Ask where to save each file" setting.
+Saves the generated PDF, Markdown or text file (or a ZIP of separate files or of Markdown with its images) to the user's downloads folder through chrome.downloads, which respects the user's "Ask where to save each file" setting.
 ```
 
 **notifications**
@@ -167,17 +173,17 @@ Shows a system notification when an export finishes or fails, because large expo
 
 **contextMenus**
 ```
-Adds two items to the context menu of links to Confluence pages: "Export this page to PDF" and "Export this page + children". They let users export a page without opening it first.
+Adds two items to the context menu of links to Confluence pages: "Export this page" and "Export this page + children". They let users export a page without opening it first.
 ```
 
 **offscreen**
 ```
-Extension service workers cannot create blob: URLs. An offscreen document (reason: BLOBS) turns the generated PDF bytes into a blob URL so chrome.downloads can save the file. It does nothing else and is closed when it is no longer needed.
+Extension service workers cannot create blob: URLs. An offscreen document (reason: BLOBS) turns the generated file's bytes (PDF, Markdown, text or ZIP) into a blob URL so chrome.downloads can save the file. It does nothing else and is closed when it is no longer needed.
 ```
 
 **Host permissions (optional_host_permissions: https://*/*, http://*/*)**
 ```
-No host permissions are granted at install time. Confluence can run on any domain: Atlassian Cloud (*.atlassian.net), Cloud custom domains, and self-hosted Data Center/Server instances on company domains (sometimes plain HTTP inside a company network). The extension can't know these domains in advance, so it declares them as optional and, when the user first exports from a site, calls chrome.permissions.request for that one origin only (e.g. https://wiki.example.com/*). Access is then used only to read content from that Confluence site with HTTP GET requests (same-origin, using the user's existing session) and to open a background tab on that site for printing. While that tab builds the PDF, the browser loads the images and other resources embedded in the pages from wherever they are referenced (usually the same site; authors can also embed images from other hosts), as when the page is viewed; no referrer is sent with them. Users can review and revoke granted sites on the options page or in chrome://extensions.
+No host permissions are granted at install time. Confluence can run on any domain: Atlassian Cloud (*.atlassian.net), Cloud custom domains, and self-hosted Data Center/Server instances on company domains (sometimes plain HTTP inside a company network). The extension can't know these domains in advance, so it declares them as optional and, when the user first exports from a site, calls chrome.permissions.request for that one origin only (e.g. https://wiki.example.com/*). Access is then used only to read content from that Confluence site with HTTP GET requests (same-origin, using the user's existing session) and to open a background tab on that site for printing. While that tab builds the PDF, the browser loads the images and other resources embedded in the pages from wherever they are referenced (usually the same site; authors can also embed images from other hosts), as when the page is viewed; no referrer is sent with them. For a Markdown export with "Include images", the same tab downloads the images stored on the Confluence site (GET, session cookie only for the Confluence site itself; Cloud attachments redirect to Atlassian's media service) to bundle them in the ZIP; images hosted elsewhere are not downloaded and keep their original links. Users can review and revoke granted sites on the options page or in chrome://extensions.
 ```
 
 ### Remote code

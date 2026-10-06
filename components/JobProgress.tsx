@@ -1,5 +1,6 @@
 import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
+import { formatOf } from '../lib/format';
 import { callSw } from '../lib/rpc';
 import type { ExportJobState, JobError } from '../lib/types';
 import { Button } from './Button';
@@ -31,7 +32,10 @@ const PHASE: Record<string, string> = {
  * and page titles that change several times a second.
  */
 function announcement(job: ExportJobState): string {
-  if (isJobActive(job.status)) return `${PHASE[job.status] ?? 'Exporting'}…`;
+  if (isJobActive(job.status)) {
+    const converting = job.status === 'rendering' && formatOf(job.request?.options) !== 'pdf';
+    return `${converting ? 'Converting the pages' : (PHASE[job.status] ?? 'Exporting')}…`;
+  }
   if (job.status === 'done') return job.result ? 'Export complete. The file was saved to your downloads.' : 'Export complete.';
   if (job.status === 'cancelled') return 'Export cancelled.';
   return `Export failed. ${job.message ?? ''}`.trim();

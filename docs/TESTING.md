@@ -4,8 +4,8 @@ Testing has four layers:
 
 | Layer | Tooling | Runs in CI | What it proves |
 |---|---|---|---|
-| Unit | Vitest + happy-dom (`tests/unit/*.test.ts`) | Yes | Pure logic: URL parsing, tiny-link decoding, pagination, collection order, link extraction, sanitizer, macro detection, session checks, filenames, settings and policy validation, PDF merge/outline, zip |
-| E2E | Playwright + the built extension + a local mock Confluence (`tests/e2e/`) | Yes | The whole pipeline in a real Chromium: popup / preview → worker tab → printToPDF → live render → pdf-lib → download |
+| Unit | Vitest + happy-dom (`tests/unit/*.test.ts`) | Yes | Pure logic: URL parsing, tiny-link decoding, pagination, collection order, link extraction, sanitizer, macro detection, session checks, filenames, settings and policy validation, PDF merge/outline, zip, Markdown/text conversion, the runner's PDF and Markdown/text branches, image downloads and output chunking (`output.test.ts`) |
+| E2E | Playwright + the built extension + a local mock Confluence (`tests/e2e/`) | Yes | The whole pipeline in a real Chromium: popup / preview → worker tab → printToPDF → live render → pdf-lib → download; and worker tab → Markdown / text conversion → image download → ZIP → download |
 | Live | Playwright + the built extension + two **public** Confluence sites (`tests/live/`) | Opt-in: weekly + manual workflow | The mock's assumptions still hold for real Cloud and Data Center, as an anonymous visitor |
 | Manual QA | The checklist below, on real Cloud and Data Center sites | Before each release | Real-world fidelity, performance, store-review behavior |
 
@@ -96,6 +96,18 @@ Chromium), no foreign requests; (p) session expires mid-export → one sign-in e
 helper tab; (s) public site, not signed in: the export runs anonymously, a page whose request
 fails at the network level is skipped (no "please log in"), a non-public page says so.
 
+Markdown and text (`tests/e2e/formats.spec.ts`): (md1) one page as Markdown without images → a
+single `.md` (front matter, `# Title`, demoted headings, fenced `java` code, `**Info:**` panels,
+`<details>`, a GFM table, the iframe's link, absolute image URLs, nothing of the injected script);
+(md2) with images → a ZIP whose `.md` references `assets/103/…` relatively and every reference is
+an entry (a real PNG fetched with the session cookie); (md3) a broken image → one degraded
+"Images" error, the `.md` keeps the absolute URL; (txt1) a subtree as text → titles underlined in
+tree order, 72-`=` separators, indented code, aligned table rows, no HTML; (md4) separate
+Markdown files → `00-Contents.md`, `01-…` … `04-…` in tree order, links between pages and to
+assets resolve inside the ZIP. Each checks that the service worker never called
+`chrome.debugger.attach` (a spy installed in the service worker; (md5) proves the spy sees a PDF
+export's attach).
+
 Not covered by E2E (Chrome UI the tests cannot drive): the runtime permission prompt and the
 `pendingStart` hand-off (unit-tested: `claimPendingStart` starts a pending export once), the
 keyboard shortcut, the context menu (its link patterns are unit-tested), notifications, the
@@ -117,8 +129,8 @@ sites, without signing in:
 
 | Site | Flavour | Tests (`tests/live/`) |
 |---|---|---|
-| [cwiki.apache.org](https://cwiki.apache.org/confluence) (Apache Software Foundation) | Data Center 9.2, context path `/confluence` | `apache-dc.spec.ts`: popup detection on the "Community Over Code" home page; that page as one PDF (title, outline, every image loaded, GET only); a small, inactive subtree (COMDEV 199529919) in tree order with matching bookmarks; linked pages from KIP-1342 (a tiny link and a `/display/` title link, both internal in the PDF); the preview list |
-| [uconn.atlassian.net](https://uconn.atlassian.net/wiki/spaces/AI/overview) ("AI" space) | Cloud | `uconn-cloud.spec.ts`: popup detection on the space overview; a page with attachment images (media redirect) as one PDF; a small subtree; a folder export |
+| [cwiki.apache.org](https://cwiki.apache.org/confluence) (Apache Software Foundation) | Data Center 9.2, context path `/confluence` | `apache-dc.spec.ts`: popup detection on the "Community Over Code" home page; that page as one PDF (title, outline, every image loaded, GET only); a small, inactive subtree (COMDEV 199529919) in tree order with matching bookmarks; linked pages from KIP-1342 (a tiny link and a `/display/` title link, both internal in the PDF); the preview list; Markdown with images: the home page plus a long-unchanged survey page with 11 attachment PNGs (COMDEV 67635266, since the COC space has no images) → a ZIP with one `.md` and the downloaded PNGs, every reference resolving |
+| [uconn.atlassian.net](https://uconn.atlassian.net/wiki/spaces/AI/overview) ("AI" space) | Cloud | `uconn-cloud.spec.ts`: popup detection on the space overview; a page with attachment images (media redirect) as one PDF; a small subtree; a folder export; the same image page as Markdown with images (attachments downloaded through the `api.media.atlassian.com` redirect, anonymously, bundled as real PNGs); the same page as plain text (underlined title, `[Image: …]` labels, no markup) |
 
 **Why.** The mock (tests/e2e) encodes what we believe Confluence does. These sites check it
 against the real thing: worker tab on a JSON endpoint, anonymous access (a public site is not a
@@ -135,6 +147,9 @@ demand in GitHub Actions (`.github/workflows/live.yml`), never in the default CI
 
 **Politeness.** These are community-run servers. The suite uses one worker, sets API
 concurrency to 2, keeps every export at ≤ 15 pages, never runs live render, and never crawls.
+The whole suite must finish in **under 2 minutes**; new tests export single pages (or two).
+The format tests keep their downloads under `test-results/live/<test>/` (the Markdown ZIP also
+unzipped) for reading the output by eye.
 Don't add tests that export whole spaces, loop over many pages, or run on every push. While
 exploring, cache responses locally instead of re-fetching.
 
@@ -210,6 +225,9 @@ Gliffy diagram (if the app is installed), and a page that a second test user can
 ### Options and other entry points
 
 - [ ] **Separate files** produces a ZIP with one PDF per page and unique filenames.
+- [ ] **Markdown** (popup format switch): one page without images → a `.md` that renders correctly on GitHub (tables, code with language, task lists, `<details>`); with images → a ZIP whose images show in a Markdown viewer (relative links); a page tree → internal links jump to the right heading; one file per page → `NN-` files in tree order and working links between them. No "started debugging" bar appears.
+- [ ] **Text**: the `.txt` opens cleanly in Notepad and TextEdit (UTF-8, umlauts and emoji intact), tables are aligned, and links show as `text (url)`.
+- [ ] Switching the format hides the PDF-only options in the preview; the options page keeps them under "PDF layout". On the options page, a managed `defaultOptions.format` locks the format control (the preview and the popup still let you pick a format per export).
 - [ ] The filename is `{SPACE}_{Root title}_{YYYY-MM-DD}.pdf`, with characters that are invalid on Windows or macOS removed.
 - [ ] With Chrome's "Ask where to save each file" on, the Save dialog appears. With it off, the file goes straight to Downloads.
 - [ ] **Alt+Shift+P** exports the current page without opening the popup.

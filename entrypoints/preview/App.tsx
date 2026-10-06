@@ -8,6 +8,7 @@ import { JobProgress } from '../../components/JobProgress';
 import { exportableCount, isJobActive, jobPageCount, jobPercent, largeExportGuard, plural } from '../../components/logic';
 import { Notice } from '../../components/Notice';
 import { OptionsForm } from '../../components/OptionsForm';
+import { FORMATS, exportButtonLabel, formatOf } from '../../lib/format';
 import { PageList } from '../../components/PageList';
 import { TreePicker } from '../../components/TreePicker';
 import { hasSiteAccess, originPattern, requestSiteAccess } from '../../lib/permissions';
@@ -280,7 +281,7 @@ export function App(): JSX.Element {
           <Icon name="pdf" size={16} />
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <h1>Export to PDF</h1>
+          <h1>{options ? `Export to ${FORMATS[formatOf(options)].label}` : 'Export'}</h1>
           {request ? (
             <div class="page-sub">
               {describeRequest(request)} · {host}
@@ -408,8 +409,8 @@ export function App(): JSX.Element {
               ) : null}
             </main>
 
-            <aside class="preview-side card" aria-label="PDF options">
-              <div class="card-title">PDF options</div>
+            <aside class="preview-side card" aria-label="Export options">
+              <div class="card-title">Export options</div>
               <p class="card-desc">Defaults come from Settings.</p>
               <OptionsForm
                 variant="preview"
@@ -478,7 +479,7 @@ export function App(): JSX.Element {
                     disabled={!canExport}
                     onClick={() => void startExport()}
                   >
-                    {options.separateFiles ? 'Export ZIP' : 'Export PDF'}
+                    {exportButtonLabel(options)}
                   </Button>
                 </>
               )}
@@ -580,7 +581,7 @@ function JobView({
       ) : null}
       <JobProgress job={job} onExportAgain={() => onExportAgain(job.request)} onRetried={onRetried} />
       {isJobActive(job.status) ? (
-        <p class="hint">Keep this tab open until the export finishes. Your PDF is saved to your Downloads.</p>
+        <p class="hint">Keep this tab open until the export finishes. The file is saved to your Downloads.</p>
       ) : null}
     </div>
   );

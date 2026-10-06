@@ -136,6 +136,7 @@ export function sanitizePageHtml(html: string, ctx: SanitizeContext): DocumentFr
   const body = parsed.body;
   const prefix = `p${ctx.pageId}-`;
 
+  keepExpandTitles(body);
   for (const el of Array.from(body.querySelectorAll(CHROME_SELECTOR))) el.remove();
   replaceUnsupportedContent(body, { pageUrl: ctx.pageUrl });
 
@@ -148,6 +149,7 @@ export function sanitizePageHtml(html: string, ctx: SanitizeContext): DocumentFr
   fixImages(body, ctx.site);
   fixMediaAttributes(body, ctx.site);
   rewriteLinks(body, ctx, prefix);
+  separateAttachmentLinks(body);
   prefixIds(body, prefix);
   demoteHeadings(body);
   promoteHeaderRows(body);
@@ -224,10 +226,30 @@ function fixJiraIssues(root: Element): void {
   for (const issue of Array.from(root.querySelectorAll('.jira-issue[data-jira-key]'))) {
     for (const ph of Array.from(issue.querySelectorAll('.issue-placeholder'))) ph.remove();
     const summary = issue.querySelector('.summary');
+    // Anonymous view: an empty summary (after a dash) and a status that is only `( <icon> )`.
+    for (const status of Array.from(issue.querySelectorAll('.jira-status'))) {
+      if (/^[\s()]*$/.test(status.textContent || '')) status.remove();
+    }
+    if (summary && !(summary.textContent || '').trim()) {
+      removeDashBefore(summary);
+      summary.remove();
+      continue;
+    }
     if (!summary || !/^\s*getting issue details/i.test(summary.textContent || '')) continue;
     const key = issue.querySelector('a.jira-issue-key, a[href]');
     if (key) issue.replaceChildren(key);
     else issue.replaceChildren(issue.ownerDocument.createTextNode(issue.getAttribute('data-jira-key') || ''));
+  }
+}
+
+/** Drops the ` - ` text separating an issue key from the (removed) summary. */
+function removeDashBefore(el: Element): void {
+  for (let n = el.previousSibling; n; n = n.previousSibling) {
+    if (n.nodeType !== 3) return;
+    const t = n.textContent || '';
+    if (!t.trim()) continue;
+    if (/[-–—]\s*$/.test(t)) n.textContent = t.replace(/\s*[-–—]\s*$/, ' ');
+    return;
   }
 }
 
@@ -254,6 +276,19 @@ function markTaskLists(root: Element): void {
     const first = li.firstElementChild;
     if (first && first.classList.contains('cf-task-box')) continue;
     li.insertBefore(glyph(doc, checked), li.firstChild);
+  }
+}
+
+/**
+ * DC 9 wraps the expand title in a <button> (`.expand-control > button > .expand-control-text`),
+ * which would go with the UI chrome: unwrap it first so `openExpands` finds the title.
+ */
+function keepExpandTitles(root: Element): void {
+  for (const button of Array.from(root.querySelectorAll('.expand-control button'))) {
+    const parent = button.parentNode;
+    if (!parent) continue;
+    while (button.firstChild) parent.insertBefore(button.firstChild, button);
+    button.remove();
   }
 }
 
@@ -408,6 +443,15 @@ function rewriteLinks(root: Element, ctx: SanitizeContext, prefix: string): void
       continue;
     }
     if (url.protocol === 'http:' || url.protocol === 'https:') {
+      const attachment = url.origin === ctx.site.origin ? previewAttachment(url, ctx.site) : null;
+      if (attachment) {
+        // View-file macro: `…/pages/{id}/Title?preview=/{id}/{attachmentId}/{file}` opens the
+        // page itself with a preview overlay; link the attachment instead.
+        a.setAttribute('href', attachment.href);
+        a.setAttribute('data-cf-attachment', '');
+        if (!a.querySelector('img') && /(…|\.\.\.)\s*$/.test(a.textContent || '')) a.textContent = attachment.name;
+        continue;
+      }
       const targetId =
         url.origin === ctx.site.origin ? (linkedResourceId(a) ?? contentIdFromUrl(url, ctx.site) ?? indexedId(url, ctx)) : null;
       if (targetId && (targetId === ctx.pageId || ctx.exportedIds.has(targetId))) {
@@ -424,6 +468,23 @@ function rewriteLinks(root: Element, ctx: SanitizeContext, prefix: string): void
     }
     a.setAttribute('href', url.href);
   }
+}
+
+/** Attachment download URL for a view-file `?preview=/{pageId}/{attachmentId}/{file}` link. */
+function previewAttachment(url: URL, site: SiteInfo): { href: string; name: string } | null {
+  const m = /^\/(\d+)\/(\d+)\/(.+)$/.exec(url.searchParams.get('preview') || '');
+  if (!m) return null;
+  const name = m[3]!; // searchParams already decoded it
+  return { href: `${site.baseUrl.replace(/\/+$/, '')}/download/attachments/${m[1]}/${encodeURIComponent(name)}`, name };
+}
+
+/** View-file links written back to back (`<a>…</a><a>…</a>`) get a line break between them. */
+function separateAttachmentLinks(root: Element): void {
+  for (const a of Array.from(root.querySelectorAll('a[data-cf-attachment]'))) {
+    const next = a.nextSibling;
+    if (next && next.nodeType === 1 && (next as Element).tagName === 'A') a.after(a.ownerDocument.createElement('br'));
+  }
+  for (const a of Array.from(root.querySelectorAll('a[data-cf-attachment]'))) a.removeAttribute('data-cf-attachment');
 }
 
 const ID_REF_ATTRS = ['headers', 'aria-labelledby', 'aria-describedby', 'aria-controls', 'aria-owns', 'for'];

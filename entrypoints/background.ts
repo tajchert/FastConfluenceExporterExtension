@@ -136,7 +136,7 @@ async function startOrPreview(request: ExportRequest): Promise<void> {
   try {
     await manager.startJob(request);
   } catch (e) {
-    await showInfo('PDF export failed', errorMessage(e));
+    await showInfo('Export failed', errorMessage(e));
   }
 }
 
@@ -177,11 +177,11 @@ function setupContextMenus(): void {
       void chrome.runtime.lastError;
       const common = { contexts: ['link'] as ['link'], targetUrlPatterns };
       chrome.contextMenus.create(
-        { id: MENU_EXPORT_PAGE, title: t('contextMenuExportPage', 'Export this page to PDF'), ...common },
+        { id: MENU_EXPORT_PAGE, title: t('contextMenuExportPage', 'Export this page'), ...common },
         () => void chrome.runtime.lastError,
       );
       chrome.contextMenus.create(
-        { id: MENU_EXPORT_TREE, title: t('contextMenuExportTree', 'Export this page + children to PDF'), ...common },
+        { id: MENU_EXPORT_TREE, title: t('contextMenuExportTree', 'Export this page + children'), ...common },
         () => void chrome.runtime.lastError,
       );
     });
@@ -232,7 +232,7 @@ function handleContextClick(info: chrome.contextMenus.OnClickData, tab?: chrome.
   }
   if (link.protocol !== 'https:' && link.protocol !== 'http:') return;
   const mode: ExportMode = info.menuItemId === MENU_EXPORT_TREE ? 'subtree' : 'current';
-  void exportLink(link, mode, tab).catch((e) => showInfo('PDF export failed', errorMessage(e)));
+  void exportLink(link, mode, tab).catch((e) => showInfo('Export failed', errorMessage(e)));
 }
 
 /**
@@ -304,7 +304,7 @@ async function onPermissionsAdded(perms: chrome.permissions.Permissions): Promis
     const jobId = await manager.claimPendingStart(pending);
     if (pending.request.mode !== 'current') await manager.openJobPage(jobId, pending.request.sourceTabId);
   } catch (e) {
-    await showInfo('PDF export failed', errorMessage(e));
+    await showInfo('Export failed', errorMessage(e));
   }
 }
 
@@ -332,7 +332,7 @@ export default defineBackground(() => {
 
   chrome.commands.onCommand.addListener((command, tab) => {
     if (command !== COMMAND_EXPORT_CURRENT) return;
-    void exportActiveTab(tab).catch((e) => showInfo('PDF export failed', errorMessage(e)));
+    void exportActiveTab(tab).catch((e) => showInfo('Export failed', errorMessage(e)));
   });
 
   chrome.contextMenus.onClicked.addListener(handleContextClick);

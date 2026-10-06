@@ -1,5 +1,5 @@
 /**
- * Download filename helpers (FR-14): `{spaceKey}_{title}_{YYYY-MM-DD}.{ext}`.
+ * Download filename helpers (FR-14): `{spaceKey}_{title}_{YYYY-MM-DD}.{ext}` (pdf, md, txt or zip).
  *
  * The result must be accepted by chrome.downloads on every desktop OS, so we strip everything
  * Windows rejects (reserved characters, reserved device names, trailing dots/spaces), control and
@@ -47,10 +47,15 @@ export function sanitizeFilenamePart(s: string, maxLen: number = DEFAULT_PART_LE
   out = trimEdges(out);
   if (maxLen > 0) out = trimEdges(truncateCodePoints(out, maxLen));
   // A part that is (or starts with, before an extension dot) a reserved device name is renamed.
-  const stem = out.split('.')[0];
-  if (WINDOWS_RESERVED_NAME.test(stem)) out = `${out}_`;
+  // The `_` goes after the stem so an extension stays last: `CON.png` → `CON_.png`.
+  const dot = out.indexOf('.');
+  const stem = dot < 0 ? out : out.slice(0, dot);
+  if (WINDOWS_RESERVED_NAME.test(stem)) out = `${stem}_${out.slice(stem.length)}`;
   return out;
 }
+
+/** Extensions of downloaded exports: one PDF / Markdown / text document, or a ZIP bundle. */
+export type FilenameExt = 'pdf' | 'zip' | 'md' | 'txt';
 
 function isoDate(d: Date): string {
   const y = d.getFullYear();
@@ -64,7 +69,7 @@ export function buildFilename(p: {
   spaceKey?: string;
   title: string;
   date?: Date;
-  ext: 'pdf' | 'zip';
+  ext: FilenameExt;
 }): string {
   const date = isoDate(p.date && !Number.isNaN(p.date.getTime()) ? p.date : new Date());
   const key = sanitizeFilenamePart(p.spaceKey ?? '', 32);

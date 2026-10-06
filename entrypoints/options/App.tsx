@@ -166,9 +166,12 @@ export function App(): JSX.Element {
         <>
           <section class="card" aria-labelledby="defaults-title">
             <h2 id="defaults-title" class="card-title">
-              PDF defaults
+              Export defaults
             </h2>
-            <p class="card-desc">Used for every new export. You can still change them per export in the preview.</p>
+            <p class="card-desc">
+              Used for every new export (also the keyboard shortcut and the context menu). You can still change them per
+              export in the popup and the preview.
+            </p>
             <OptionsForm
               variant="settings"
               value={form.defaults}
@@ -177,7 +180,7 @@ export function App(): JSX.Element {
             />
             <div class="field" style={{ marginTop: '16px' }}>
               <label class="field-label" for="custom-css">
-                Custom CSS (advanced)
+                Custom CSS (advanced, PDF only)
               </label>
               <textarea
                 id="custom-css"

@@ -155,6 +155,38 @@ export type SwToWorker =
       cover: CoverInfo | null; // null = no cover in this batch
       toc: boolean;
     }
+  /**
+   * Markdown / plain-text export (options.format 'markdown' | 'text'): converts the fetched pages
+   * (`pageIds`, in export order) with lib/convert in the worker tab's DOM, then downloads the
+   * images the Markdown references (only with `options.downloadImages`; same-origin fetch,
+   * `concurrency` at a time, per-image timeout and size caps). Runs in the background like
+   * `worker/fetch` (outcome: `worker/done`, op 'convert'; image progress: `worker/progress`).
+   * The produced files stay in the worker tab; the service worker reads their bytes with
+   * `worker/readOutput`, so no single message carries the whole export.
+   */
+  | {
+      type: 'worker/convert';
+      jobId: string;
+      pageIds: string[];
+      allPages: PageRef[]; // the full export, for internal links and the TOC
+      excludeIds?: string[];
+      options: ExportOptions;
+      cover: CoverInfo | null;
+      toc: boolean;
+      /** One file per page (ZIP) instead of one combined document. */
+      separate: boolean;
+      /** Stem of the combined document, e.g. `ENG_Release notes_2026-10-06`. */
+      baseName: string;
+      /** Concurrent image downloads (settings.apiConcurrency). */
+      concurrency: number;
+    }
+  /**
+   * Read the output of the last `worker/convert` of a job, starting at entry `index`, byte
+   * `offset`: whole entries are packed into one answer up to `maxBytes` raw bytes (default and
+   * maximum 8 MiB); a bigger entry is split into several chunks. `next` = where to continue, null
+   * when everything was read.
+   */
+  | { type: 'worker/readOutput'; jobId: string; index: number; offset: number; maxBytes?: number }
   /** Space name for the cover / filename of 'space' exports. */
   | { type: 'worker/space'; site: SiteInfo; spaceKey: string }
   /**
@@ -176,10 +208,31 @@ export interface CoverInfo {
   siteTitle?: string;
 }
 
+/** A file produced by `worker/convert`, kept in the worker tab until read with `worker/readOutput`. */
+export interface OutputEntry {
+  /** Relative POSIX path inside the export (`ENG_Home_2026-10-06.md`, `assets/123/diagram.png`). */
+  path: string;
+  /** Size in bytes (documents: UTF-8). */
+  size: number;
+  /** 'document' = a converted .md / .txt file; 'asset' = a downloaded image. */
+  kind: 'document' | 'asset';
+}
+
+/** Outcome of `worker/convert`. */
+export interface ConvertOpResult {
+  /** Documents first (in output order), then the downloaded images. Index = `worker/readOutput` index. */
+  entries: OutputEntry[];
+  /** Content that could not be converted and became a link to Confluence (FR-9). */
+  placeholders: number;
+  /** Images that could not be downloaded; the Markdown keeps their absolute URLs instead. */
+  failedAssets: { url: string; path: string; reason: string }[];
+}
+
 /** Outcome payloads of the background operations (`worker/done`). */
 export interface WorkerOpResults {
   collect: { pages: PageRef[]; warnings: string[] };
   fetch: { results: FetchedPageInfo[] };
+  convert: ConvertOpResult;
 }
 export type WorkerOp = keyof WorkerOpResults;
 
@@ -194,10 +247,21 @@ export interface SwToWorkerResponses {
     /** Ids of pages that ended up in the document, in order. */
     pageIds: string[];
   };
+  'worker/convert': { started: true };
+  'worker/readOutput': ReadOutputResponse;
   'worker/space': { key: string; name: string; homepageId?: string } | null;
   'worker/resolve': ResolvedContent | null;
   'worker/cancel': void;
   'worker/dispose': void;
+}
+
+/** Upper limit (raw bytes) of one `worker/readOutput` answer; base64 adds a third. */
+export const READ_OUTPUT_MAX_BYTES = 8 * 1024 * 1024;
+
+export interface ReadOutputResponse {
+  /** Consecutive pieces: `base64` holds bytes [offset, offset + n) of entry `index`. */
+  chunks: { index: number; offset: number; base64: string }[];
+  next: { index: number; offset: number } | null;
 }
 
 export interface ResolvedContent {
@@ -213,7 +277,7 @@ export interface ResolvedContent {
 export type WorkerToSw =
   | { type: 'worker/progress'; jobId: string; done: number; total: number; current?: string }
   | { type: 'worker/throttled'; jobId: string; retryInMs: number }
-  /** A background `worker/collect` / `worker/fetch` finished (`result`) or failed (`error`). */
+  /** A background `worker/collect` / `worker/fetch` / `worker/convert` finished (`result`) or failed (`error`). */
   | { type: 'worker/done'; jobId: string; op: WorkerOp; result?: unknown; error?: string; code?: string }
   | { type: 'worker/ready' };
 

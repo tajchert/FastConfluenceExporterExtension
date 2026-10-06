@@ -60,6 +60,18 @@ describe('normalizeSettings', () => {
     expect(normalizeSettings({ printBatchSize: 2000 }).printBatchSize).toBe(400);
   });
 
+  it('defaults to PDF with images on, and validates the output format', () => {
+    expect(DEFAULT_OPTIONS.format).toBe('pdf');
+    expect(DEFAULT_OPTIONS.downloadImages).toBe(true);
+    // Settings stored before formats existed get the defaults.
+    const old = normalizeSettings({ defaults: { paperSize: 'Letter', separateFiles: true } });
+    expect(old.defaults).toMatchObject({ format: 'pdf', downloadImages: true, paperSize: 'Letter', separateFiles: true });
+    expect(normalizeOptions({ format: 'markdown', downloadImages: false })).toMatchObject({ format: 'markdown', downloadImages: false });
+    expect(normalizeOptions({ format: 'text' }).format).toBe('text');
+    expect(normalizeOptions({ format: 'docx', downloadImages: 'yes' })).toMatchObject({ format: 'pdf', downloadImages: true });
+    expect(normalizeOptions({ format: 'PDF' }, { ...DEFAULT_OPTIONS, format: 'text' }).format).toBe('text');
+  });
+
   it('normalizeOptions keeps valid values', () => {
     const o = normalizeOptions({ ...DEFAULT_OPTIONS, orientation: 'landscape', customCss: 'h1{color:red}' });
     expect(o.orientation).toBe('landscape');
@@ -83,6 +95,22 @@ describe('policy', () => {
       defaultOptions: { paperSize: 'Letter', includeCover: false, marginsMm: { top: 10 } },
     });
     expect(normalizePolicy({ maxPages: 0, blockedSpaceKeys: [] })).toEqual({});
+  });
+
+  it('normalizePolicy keeps a valid default format and downloadImages, drops invalid ones', () => {
+    expect(normalizePolicy({ defaultOptions: { format: 'markdown', downloadImages: false } })).toEqual({
+      defaultOptions: { format: 'markdown', downloadImages: false },
+    });
+    // Valid values equal to the defaults are kept too (they are still enforced).
+    expect(normalizePolicy({ defaultOptions: { format: 'pdf', downloadImages: true } })).toEqual({
+      defaultOptions: { format: 'pdf', downloadImages: true },
+    });
+    expect(normalizePolicy({ defaultOptions: { format: 'html', downloadImages: 1 } })).toEqual({});
+  });
+
+  it('applyPolicy enforces the default format', () => {
+    const s = applyPolicy({ ...DEFAULT_SETTINGS, defaults: { ...DEFAULT_OPTIONS, format: 'pdf' } }, { defaultOptions: { format: 'text' } });
+    expect(s.defaults.format).toBe('text');
   });
 
   it('applyPolicy overrides defaults and forces live render off', () => {
@@ -123,7 +151,7 @@ describe('save / load / change', () => {
     const s: Settings = {
       ...DEFAULT_SETTINGS,
       apiConcurrency: 7,
-      defaults: { ...DEFAULT_OPTIONS, orientation: 'landscape', customCss: css },
+      defaults: { ...DEFAULT_OPTIONS, orientation: 'landscape', customCss: css, format: 'markdown', downloadImages: false },
     };
     await saveSettings(s);
     const sync = (await chrome.storage.sync.get('settings')).settings as Settings;

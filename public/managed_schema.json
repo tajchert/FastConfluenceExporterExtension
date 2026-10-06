@@ -20,9 +20,16 @@
     },
     "defaultOptions": {
       "title": "Enforced default export options",
-      "description": "Default PDF options that override the user's saved defaults. Users can still change options for an individual export.",
+      "description": "Default export options that override the user's saved defaults. Users can still change options for an individual export.",
       "type": "object",
       "properties": {
+        "format": {
+          "title": "Output format",
+          "description": "pdf (default), markdown (.md) or text (.txt).",
+          "type": "string",
+          "enum": ["pdf", "markdown", "text"]
+        },
+        "downloadImages": { "title": "Markdown: bundle page images in a ZIP", "type": "boolean" },
         "paperSize": {
           "title": "Paper size",
           "type": "string",
@@ -49,7 +56,7 @@
         "includeComments": { "title": "Include comments", "type": "boolean" },
         "pageNumbers": { "title": "Page numbers in the footer", "type": "boolean" },
         "liveRender": { "title": "Live render diagrams by default", "type": "boolean" },
-        "separateFiles": { "title": "One PDF per page (ZIP)", "type": "boolean" },
+        "separateFiles": { "title": "One file per page (ZIP)", "type": "boolean" },
         "includeArchived": { "title": "Include archived pages", "type": "boolean" },
         "shrinkWideTables": { "title": "Shrink wide tables to fit", "type": "boolean" },
         "customCss": { "title": "Custom print CSS (branding)", "type": "string" }

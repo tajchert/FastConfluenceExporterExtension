@@ -14,7 +14,7 @@ processes it **locally in your browser**:
 
 | Data | How it is used | Where it goes |
 |---|---|---|
-| Confluence page content (text, HTML, images, titles, breadcrumbs, last-updated dates, author names) | Read from the Confluence site you are viewing to build the PDF. | Kept in browser memory while the export runs, then written to the PDF in your downloads folder. It is discarded once the export finishes or is cancelled. |
+| Confluence page content (text, HTML, images, titles, breadcrumbs, last-updated dates, author names) | Read from the Confluence site you are viewing to build the PDF (or Markdown / text file). | Kept in browser memory while the export runs, then written to the file in your downloads folder. It is discarded once the export finishes or is cancelled. |
 | Address (URL) of the current tab | Read when you click the extension icon, press its keyboard shortcut or use its context menu, so the extension can tell which page, folder or space to export. | Stays on your device. |
 | Your Confluence display name | Printed on the PDF cover page ("Exported by") and in the PDF's Author field. | Stays on your device, inside the PDF you create. |
 | Export progress (page titles, URLs, error messages for the running export) | Shows progress and the error summary. | Stored in the browser's session storage, which is held in memory and cleared when the browser closes. |
@@ -34,6 +34,14 @@ processes it **locally in your browser**:
   outside your Confluence site, just as when you view the page in Confluence; such a host learns
   your IP address and that the resource was requested. The extension sends no referrer with
   these requests, so they do not reveal the address of your Confluence site.
+- **Markdown with images.** When you export to Markdown with "Include images" on, the export tab
+  downloads the images stored on your Confluence site (attachments, without a referrer) to put
+  them in the ZIP next to the Markdown file. Images an author inserted from another website are
+  not downloaded: the Markdown keeps their original web address, so the export itself never
+  contacts other hosts. Your Confluence session cookie is only sent to your Confluence site
+  itself (Confluence Cloud serves attachments from Atlassian's media service, with a short-lived
+  access link that Confluence provides). Markdown and plain-text exports stay on your
+  device like PDFs.
 - Apart from that, the extension makes **no network requests**: no analytics, telemetry, crash
   reporting, advertising, fonts, CDNs or remote code. All of its code ships inside the extension
   package.

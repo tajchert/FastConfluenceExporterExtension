@@ -86,7 +86,16 @@ export interface FetchedPageInfo {
 export type PaperSize = 'A4' | 'Letter' | 'Legal' | 'A3';
 export type Orientation = 'portrait' | 'landscape';
 
+/** Output format. PDF is the default; Markdown and plain text are converted in the worker tab. */
+export type ExportFormat = 'pdf' | 'markdown' | 'text';
+
 export interface ExportOptions {
+  format: ExportFormat;
+  /**
+   * Markdown only: download page images and bundle them with the .md file(s) in a ZIP
+   * (relative paths). Off = keep absolute Confluence image URLs and save a single .md file.
+   */
+  downloadImages: boolean;
   paperSize: PaperSize;
   orientation: Orientation;
   /** Page margins in millimetres. */
@@ -99,7 +108,7 @@ export interface ExportOptions {
   pageNumbers: boolean;
   /** FR-10: print client-rendered pages from the real Confluence UI. */
   liveRender: boolean;
-  /** FR-11: one PDF per page bundled in a ZIP instead of one combined PDF. */
+  /** FR-11: one file per page bundled in a ZIP instead of one combined file (any format). */
   separateFiles: boolean;
   includeArchived: boolean;
   /** Shrink very wide tables to fit the sheet. */
@@ -219,6 +228,8 @@ export interface TreeNode {
 }
 
 export const DEFAULT_OPTIONS: ExportOptions = {
+  format: 'pdf',
+  downloadImages: true,
   paperSize: 'A4',
   orientation: 'portrait',
   marginsMm: { top: 18, right: 15, bottom: 18, left: 15 },

@@ -109,9 +109,9 @@ export function statusLabel(job: Pick<ExportJobState, 'status' | 'message'>): st
     case 'fetching':
       return 'Fetching pages…';
     case 'rendering':
-      return 'Rendering PDF…';
+      return 'Rendering…';
     case 'merging':
-      return 'Finishing PDF…';
+      return 'Finishing…';
     case 'done':
       return 'Export complete';
     case 'cancelled':
@@ -226,7 +226,7 @@ export function largeExportGuard(
   if (count > limits.confirm) {
     return {
       level: 'confirm',
-      message: `This is a very large export (${count.toLocaleString()} pages). It can take a long time and use a lot of memory. Consider "Separate PDFs (ZIP)" or a smaller selection.`,
+      message: `This is a very large export (${count.toLocaleString()} pages). It can take a long time and use a lot of memory. Consider "One file per page (ZIP)" or a smaller selection.`,
     };
   }
   if (count > limits.warn) {

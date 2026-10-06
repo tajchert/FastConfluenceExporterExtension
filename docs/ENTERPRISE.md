@@ -133,6 +133,8 @@ and ignores anything malformed, so a typo can't break exports.
 
 | Key | Type | Values |
 |---|---|---|
+| `format` | string | `pdf` (default), `markdown`, `text`: the output format of new exports |
+| `downloadImages` | boolean | Markdown only: bundle page images with the `.md` file in a ZIP (default `true`) |
 | `paperSize` | string | `A4`, `Letter`, `Legal`, `A3` |
 | `orientation` | string | `portrait`, `landscape` |
 | `marginsMm` | object | `{ "top": 18, "right": 15, "bottom": 18, "left": 15 }`. Each side 0–100 mm, any subset |
@@ -142,7 +144,7 @@ and ignores anything malformed, so a typo can't break exports.
 | `includeComments` | boolean | Keep inline comment highlights |
 | `pageNumbers` | boolean | Page numbers in the footer |
 | `liveRender` | boolean | Live render by default (ignored when `disableLiveRender` is `true`) |
-| `separateFiles` | boolean | One PDF per page in a ZIP |
+| `separateFiles` | boolean | One file per page in a ZIP (any format) |
 | `includeArchived` | boolean | Include archived pages |
 | `shrinkWideTables` | boolean | Shrink wide tables to fit the sheet |
 | `customCss` | string | Extra print CSS, e.g. company fonts and colors (max 100,000 characters) |

@@ -5,7 +5,7 @@ is **generic** (any Confluence Cloud site incl. custom domains, plus Data Center
 v1 REST API) and **publishable** on the Chrome Web Store (no hard-coded hosts, runtime
 per-origin permission grants, privacy policy, no remote code).
 
-Stack: TypeScript, WXT 0.21 (MV3), Preact, pdf-lib, DOMPurify, fflate, Vitest (+happy-dom),
+Stack: TypeScript, WXT 0.21 (MV3), Preact, pdf-lib, DOMPurify, fflate, Turndown (+ GFM plugin), Vitest (+happy-dom),
 Playwright (E2E against a mock Confluence). Use the `chrome.*` API (typed by `@types/chrome`),
 not `browser.*`.
 
@@ -31,6 +31,7 @@ Code comments reference these requirement ids.
 | FR-14 | Filename `{space-key}_{root-title}_{YYYY-MM-DD}.pdf`, saved via chrome.downloads. |
 | FR-15 | Context menu on Confluence links: export page / page + children. |
 | FR-16 | Large-export guard: warn above 150 pages, require confirmation above 500. |
+| FR-17 | Output formats: PDF (default), Markdown (`.md`, optionally with its images in a ZIP) or plain text (`.txt`); one file per page (ZIP) for every format. |
 
 Non-functional targets: current page ≤ 5 s; 25-page subtree ≤ 30 s; 100 pages ≤ 2 min without a
 tab crash; one failing page never fails the whole export; only GET requests to the Confluence site.
@@ -145,7 +146,11 @@ keeps checking these.
 - **DC markup**: page tree = `div.plugin_pagetree` (empty list + `fieldset.hidden` settings) →
   placeholder; AUI's `.hidden` rows (attachments macro details, macro settings) are dropped;
   a single Jira issue (`span.jira-issue`) prints "Getting issue details… STATUS" until the browser
-  fills it → only the issue key link is kept. Links between pages also come as
+  fills it → only the issue key link is kept (for anonymous viewers the summary is empty and the
+  status only `( <icon> )`: both are dropped with their dash). View-file macro links point at the
+  page itself (`…/pages/{id}/Title?preview=/{id}/{attachmentId}/{file}`) with a truncated
+  "Name…" label → rewritten to `/download/attachments/{id}/{file}` labelled with the file name, a
+  `<br>` between adjacent ones. Links between pages also come as
   `/display/KEY/Title` and `viewpage.action?spaceKey=&title=`: they become internal links through
   a title index of the exported pages (`SanitizeContext.pageIndex`).
 - **Cloud markup**: links to another page's heading use editor-style fragments
@@ -161,7 +166,7 @@ keeps checking these.
 | Context | File | Role |
 |---|---|---|
 | Service worker | `entrypoints/background.ts` → `lib/job/*`, `lib/render/*`, `lib/pdf/*`, `lib/download.ts` | Orchestrator: job state machine, worker/live tabs, `chrome.debugger` printing, pdf-lib post-processing, downloads, notifications, context menus, keyboard command, permission-grant follow-up. **No DOM** (no DOMParser, no URL.createObjectURL). |
-| Worker tab content script | `entrypoints/worker.ts` (unlisted script → `/worker.js`) | Injected with `chrome.scripting.executeScript({files:['/worker.js']})` into a background tab opened on `workerTabUrl(site)#cfp-worker` (Cloud `{base}/api/v2/spaces?limit=1`, DC `{base}/rest/api/space?limit=1`). RPC server for `SwToWorker`. Does **all Confluence API calls** (same-origin, cookies) via `lib/confluence/*`, keeps fetched HTML in memory (plus a bounded LRU of page bodies shared by the preview's collection and the export's fetch), and **assembles the print document into its own DOM** via `lib/assemble/*`. The SW then prints this tab. Long operations (`worker/collect`, `worker/fetch`) run in the background and report their outcome with a `worker/done` notification (see §5 Service-worker lifetime). |
+| Worker tab content script | `entrypoints/worker.ts` (unlisted script → `/worker.js`) | Injected with `chrome.scripting.executeScript({files:['/worker.js']})` into a background tab opened on `workerTabUrl(site)#cfp-worker` (Cloud `{base}/api/v2/spaces?limit=1`, DC `{base}/rest/api/space?limit=1`). RPC server for `SwToWorker`. Does **all Confluence API calls** (same-origin, cookies) via `lib/confluence/*`, keeps fetched HTML in memory (plus a bounded LRU of page bodies shared by the preview's collection and the export's fetch), and **assembles the print document into its own DOM** via `lib/assemble/*`. The SW then prints this tab. For Markdown / text it **converts** the pages instead (`lib/convert`, Turndown needs a DOM) and downloads Markdown images (`lib/output/assets.ts`), keeping the files until the SW reads them (`worker/readOutput`). Long operations (`worker/collect`, `worker/fetch`, `worker/convert`) run in the background and report their outcome with a `worker/done` notification (see §5 Service-worker lifetime). |
 | Live render script | `entrypoints/live.ts` (unlisted → `/live.js`) | Injected into real Confluence page tabs for FR-10: expand macros, hide app chrome, wait for macro render, answer `live/prepare`. |
 | Popup | `entrypoints/popup/` | Probe active tab (activeTab + `executeScript({func: probePage})`), mode picker, request site permission, start "This page" export, open preview for multi-page modes. |
 | Preview tab | `entrypoints/preview/` (`/preview.html?req=<base64url JSON ExportRequest>`) | FR-6 tree picker, FR-7 preview & pruning (with breadcrumbs), FR-12 progress / cancel / error summary, FR-16 large-export guard. Collects pages over a UI port (`UI_PORT_NAME`, `components/collectClient.ts`): progress, "Throttled by Confluence, retrying…" and Cancel; closing the page cancels its collection and closes the idle helper tab. |
@@ -228,6 +233,36 @@ Shared code lives in `lib/`; shared Preact components in `components/`; UI CSS i
     the download. Close worker/live tabs, detach debugger (always in `finally`), notification,
     badge cleared.
 
+**Markdown / text branch** (`options.format` `'markdown' | 'text'`, FR-17): steps 1–6 are the same
+(live render is never requested: `liveRenderMacros: []`, no storage). Then, instead of 7–9:
+
+- 7'. **Convert** (worker, background op `worker/convert` → `worker/done` op `convert`): status
+  `rendering`, "Converting to Markdown…" / "Converting to text…". The worker calls
+  `convertPages(inert, …)` on an inert `document.implementation.createHTMLDocument('cfp-convert')`
+  (no browsing context: nothing it builds loads or runs) with the fetched bodies (combined: every
+  included ref incl. link-only ones; separate: content pages only, the cover and TOC going into a
+  `00-Contents` index file; a single content page gets neither, like a separate PDF; with no
+  content page at all — only whiteboards / databases / embeds — the combined path is used) and
+  `baseName` = the download filename stem.
+  For Markdown with `downloadImages`, it downloads `result.assets` — only images on the Confluence
+  origin (`collectAssets` skips others, `downloadAssets` refuses them via `allowedOrigin`; a CORS
+  fetch from this tab would send `Origin: <confluence>` to the other host) — (`downloadAssets`: same-origin
+  credentials, redirects followed, no referrer, `settings.apiConcurrency` at a time, 60 s and
+  25 MB per image, 300 MB in total; progress "Downloading images x/N"); failures are relinked to
+  their absolute URLs (`relinkFailedAssets`) and reported as one `degraded` "Images" error. The
+  files stay in the worker (`OutputEntry[]`: documents first, then assets).
+- 8'. **Read back** (status `merging`): the SW pulls the bytes with `worker/readOutput` (base64,
+  ≤ 8 MiB raw per answer, big entries split; `lib/output/chunks.ts`), so no message carries the
+  whole export.
+- 9'. **Save**: exactly one document and no asset → saved as is (`{key}_{title}_{date}.md|.txt`,
+  `text/markdown;charset=utf-8` / `text/plain;charset=utf-8`; with separate files and one page,
+  named after that page). Otherwise a ZIP (`.zip`): documents deflated, images stored, paths kept
+  (`assets/{pageId}/…`).
+
+No debugger session is created on this branch (no "started debugging" bar), and the PDF-only
+options (paper, orientation, margins, page numbers, live render, wide tables, custom CSS) are
+ignored. Cancel, progress, errors and notifications work as for PDF.
+
 Cancel: SW aborts its AbortController, sends `worker/cancel`, detaches debugger, cancels a pending
 download, closes tabs, status `cancelled` within 2 s.
 
@@ -241,7 +276,7 @@ export async function mapPool<T, R>(items: T[], concurrency: number,
   fn: (item: T, index: number) => Promise<R>, signal?: AbortSignal): Promise<R[]>;
 // lib/util/filename.ts
 export function sanitizeFilenamePart(s: string, maxLen?: number): string;
-export function buildFilename(p: { spaceKey?: string; title: string; date?: Date; ext: 'pdf' | 'zip' }): string;
+export function buildFilename(p: { spaceKey?: string; title: string; date?: Date; ext: 'pdf' | 'zip' | 'md' | 'txt' }): string;
 //   => `{spaceKey}_{title}_{YYYY-MM-DD}.{ext}` (FR-14), safe on Windows/macOS, no leading dots, <= 150 chars
 // lib/util/base64.ts
 export function bytesToBase64(bytes: Uint8Array): string;   // chunked, no stack overflow on 100 MB
@@ -461,7 +496,9 @@ export function finalizeExport(base: Uint8Array, o: { metadata: PdfMetadata; pag
 // the combined export in one parse: sections, live inserts (untagged), page-tree bookmarks + Chrome's heading bookmarks, numbers, metadata
 export function shiftPageIndex(index: number, inserts: { afterPageIndex: number; count: number }[]): number;
 // lib/pdf/zip.ts
-export function zipFiles(files: { name: string; data: Uint8Array }[], signal?: AbortSignal): Promise<Uint8Array>; // fflate streaming Zip, stored entries, unique names
+export function zipFiles(files: { name: string; data: Uint8Array; compress?: boolean }[], signal?: AbortSignal): Promise<Uint8Array>;
+// fflate streaming Zip; stored entries unless `compress` (deflate level 6, text); names are relative POSIX paths
+// (directories kept, `.`/`..`/empty segments dropped), unique per full path (case-insensitive, `a (2).md`)
 // lib/download.ts
 export function saveBytes(bytes: Uint8Array, filename: string, mime: string, signal?: AbortSignal): Promise<number>; // downloadId
 // Resolves once the download completed (no timeout: a "Save as" dialog may stay open); rejects with
@@ -501,8 +538,59 @@ export function removeSiteAccess(origin: string): Promise<boolean>;
 // entrypoints/offscreen/ — answers SwToOffscreen
 ```
 
+### lib/convert (owned by the "converter" agent; runs in the worker tab — real DOM, no network)
+```ts
+import type { CoverInfo } from '../messages'; import type { PageBody } from '../confluence/client';
+export interface ConvertInput {
+  pages: { ref: PageRef; body?: PageBody }[];   // export order; link-only refs (folder/whiteboard/database/embed/slides) have no body
+  allPages: PageRef[]; excludeIds?: string[];   // same meaning as AssembleInput
+  site: SiteInfo; options: ExportOptions;        // options.format is 'markdown' | 'text'
+  cover: CoverInfo | null; toc: boolean; generatedBy: string;
+  separate: boolean;                             // one file per page
+  baseName: string;                              // stem of the combined file, e.g. 'COC_Community Over Code Home_2026-10-06'
+}
+export interface ConvertedFile { path: string; text: string }   // POSIX relative path, no leading slash
+export interface AssetRef { url: string; path: string }         // absolute image URL → relative path in the bundle
+export interface ConvertResult { files: ConvertedFile[]; assets: AssetRef[]; placeholders: number }
+export function convertPages(doc: Document, input: ConvertInput): ConvertResult;
+export function relinkFailedAssets(files: ConvertedFile[], failed: AssetRef[]): ConvertedFile[];
+// Combined: '{baseName}.md|.txt'. Separate: '{NN}-{sanitized title}.{ext}' in export order (+ '00-Contents.{ext}'
+// with the cover and / or toc). Assets only for markdown + downloadImages: 'assets/{pageId}/{file}', referenced relatively.
+// Reuses sanitizePageHtml + replaceUnsupportedContent (FR-9 placeholders become a quote / text line with the link).
+// Internal links: combined '#p-{id}' (explicit <a id>), separate: relative file links. Deterministic output.
+```
+
+### lib/output, lib/format (owned by the "orchestrator" agent)
+```ts
+// lib/format.ts (shared, no runtime deps)
+export const FORMATS: Record<ExportFormat, { label: string; ext: 'pdf' | 'md' | 'txt'; mime: string }>;
+export const PDF_ONLY_OPTIONS: (keyof ExportOptions)[]; // paperSize, orientation, marginsMm, pageNumbers, liveRender, shrinkWideTables, customCss
+export function formatOf(o?: Partial<Pick<ExportOptions, 'format'>>): ExportFormat; // unknown → 'pdf'
+export function exportButtonLabel(o: Pick<ExportOptions, 'format' | 'separateFiles'>): string;
+export function isCompressible(path: string): boolean;   // text entries are deflated in the ZIP
+// lib/output/assets.ts (worker tab)
+export function downloadAssets(assets: { url: string; path: string }[], o: { concurrency: number; signal?: AbortSignal;
+  limits?: Partial<{ timeoutMs: number; maxBytes: number; maxTotalBytes: number }>; onProgress?(done, total, current?): void;
+  fetchImpl?: typeof fetch }): Promise<{ ok: { url; path; bytes: Uint8Array }[]; failed: { url; path; reason: string }[] }>;
+// credentials 'same-origin' (cookie only to Confluence: Cloud attachments 302 → api.media.atlassian.com, which answers
+// `Access-Control-Allow-Origin: *` and would reject a credentialed request), redirect 'follow', referrerPolicy 'no-referrer';
+// an HTML answer (login page) or a size cap is a failure; one failure never fails the others; cancel → AbortError.
+// lib/output/chunks.ts (pure)
+export function readOutputChunks(data: Uint8Array[], index: number, offset: number, maxBytes?: number): ReadOutputResponse; // worker
+export function collectOutput(entries: OutputEntry[], read: (index, offset) => Promise<ReadOutputResponse>, signal?): Promise<Uint8Array[]>; // SW
+```
+Worker RPC (lib/messages.ts): `worker/convert` {jobId, pageIds, allPages, excludeIds, options, cover, toc, separate,
+baseName, concurrency} → `{ started: true }`, outcome `worker/done` op `convert`:
+`ConvertOpResult { entries: OutputEntry[]; placeholders; failedAssets }` (`OutputEntry { path, size, kind: 'document' | 'asset' }`).
+`worker/readOutput` {jobId, index, offset, maxBytes?} → `{ chunks: { index, offset, base64 }[]; next: { index, offset } | null }`.
+
 ### UI (owned by the "ui" agent)
 `entrypoints/popup/`, `entrypoints/preview/`, `entrypoints/options/`, `components/*`, `assets/ui.css`.
+Format (FR-17): a "Format" segmented control (PDF · Markdown · Text) at the top of `OptionsForm` and in the popup
+(the popup's choice applies to that export only; defaults come from the settings). In the preview, PDF-only controls
+are hidden for Markdown / text (with a hint); on the options page they stay editable under "PDF layout" (they are
+the PDF defaults). Markdown adds "Include images (ZIP)"; "One PDF per page (ZIP)" reads "One file per page (ZIP)";
+buttons read "Export PDF" / "Export Markdown" / "Export text" ("Export ZIP" with separate files).
 Talks to the SW only through `callSw()` from `lib/rpc.ts` and listens for `SwBroadcast`.
 
 ## 5. Notes & decisions
@@ -539,7 +627,7 @@ Talks to the SW only through `callSw()` from `lib/rpc.ts` and listens for `SwBro
   single event or API call takes longer than 5 minutes. So (1) while a job or a preview collection
   runs, or a cached helper tab waits for its idle close, the manager pings
   `chrome.runtime.getPlatformInfo()` every 20 s; (2) long worker operations never keep one message
-  pending: `worker/collect` and `worker/fetch` answer `{ started: true }` and report the outcome
+  pending: `worker/collect`, `worker/fetch` and `worker/convert` answer `{ started: true }` and report the outcome
   with `worker/done` (`lib/job/workerOp.ts`), and the preview's collection runs over a port, not as
   one pending `runtime.onMessage` request; (3) one `Page.printToPDF` covers at most
   `printBatchSize` ≤ 400 pages.
@@ -570,7 +658,7 @@ Talks to the SW only through `callSw()` from `lib/rpc.ts` and listens for `SwBro
   from wherever they are referenced, which can be other hosts — disclosed in PRIVACY.md; the print
   document sends no referrer.
 - **Managed policy** (`public/managed_schema.json`): `blockedSpaceKeys`, `disableLiveRender`,
-  `defaultOptions`, `maxPages`. With a block list, a linked page whose space key is unknown
+  `defaultOptions` (incl. `format` and `downloadImages`), `maxPages`. With a block list, a linked page whose space key is unknown
   (pre-fetch and after the fetch) is skipped ("could not be checked against your administrator's
   policy"); same-tree pages inherit the root's (already checked) space. `maxPages + 1` is also the
   linked-mode collection budget, so the limit is reported without collecting far beyond it.

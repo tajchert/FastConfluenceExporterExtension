@@ -35,7 +35,12 @@ describe('sanitizeFilenamePart', () => {
   it('renames Windows reserved device names', () => {
     expect(sanitizeFilenamePart('CON')).toBe('CON_');
     expect(sanitizeFilenamePart('lpt1')).toBe('lpt1_');
-    expect(sanitizeFilenamePart('nul.txt')).toBe('nul.txt_');
+    expect(sanitizeFilenamePart('nul.txt')).toBe('nul_.txt');
+    // The extension stays last (bundled images must keep theirs).
+    expect(sanitizeFilenamePart('CON.png')).toBe('CON_.png');
+    expect(sanitizeFilenamePart('aux.jpg')).toBe('aux_.jpg');
+    expect(sanitizeFilenamePart('Com1.tar.gz')).toBe('Com1_.tar.gz');
+    expect(sanitizeFilenamePart('console.png')).toBe('console.png');
     expect(sanitizeFilenamePart('Console')).toBe('Console');
   });
 
@@ -78,6 +83,16 @@ describe('buildFilename', () => {
     expect(name.length).toBeLessThanOrEqual(150);
     expect(name.startsWith('LONGKEY_x')).toBe(true);
     expect(name.endsWith('_2026-10-06.pdf')).toBe(true);
+  });
+
+  it('supports Markdown and text extensions', () => {
+    expect(buildFilename({ spaceKey: 'COC', title: 'Community Over Code Home', date: DATE, ext: 'md' })).toBe(
+      'COC_Community Over Code Home_2026-10-06.md',
+    );
+    expect(buildFilename({ spaceKey: 'COC', title: 'Notes: Q1/Q2', date: DATE, ext: 'txt' })).toBe('COC_Notes- Q1-Q2_2026-10-06.txt');
+    const long = buildFilename({ spaceKey: 'K', title: 'y'.repeat(400), date: DATE, ext: 'md' });
+    expect(long.length).toBeLessThanOrEqual(150);
+    expect(long.endsWith('_2026-10-06.md')).toBe(true);
   });
 
   it('pads month and day', () => {

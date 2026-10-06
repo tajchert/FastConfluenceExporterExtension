@@ -9,6 +9,7 @@ import { saveBytes, showDownloadItem } from '../download';
 import type { PendingStartPayload, SwBroadcast, SwToWorker, UiPortEvent, UiPortRequest, WorkerToSw } from '../messages';
 import { concatPdfs, finalizeExport, finalizePdf } from '../pdf/merge';
 import { zipFiles } from '../pdf/zip';
+import { FORMATS, formatOf } from '../format';
 import { hasSiteAccess } from '../permissions';
 import { DebuggerUnavailableError, createPrintSession, detachAll, toPrintParams } from '../render/cdp';
 import { liveRenderPages } from '../render/liveRender';
@@ -228,10 +229,10 @@ async function notify(job: ExportJobState, settings: Settings): Promise<void> {
   let message: string;
   if (job.status === 'done' && job.result) {
     const skipped = job.errors.filter((e) => e.severity === 'skipped').length;
-    title = 'PDF export finished';
+    title = `${FORMATS[formatOf(job.request.options)].label} export finished`;
     message = job.result.filename + (skipped ? `\n${skipped} page${skipped === 1 ? '' : 's'} skipped` : '');
   } else if (job.status === 'error') {
-    title = 'PDF export failed';
+    title = `${FORMATS[formatOf(job.request.options)].label} export failed`;
     message = job.message ?? 'Something went wrong.';
   } else {
     return;

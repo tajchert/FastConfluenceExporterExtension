@@ -6,6 +6,30 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-07
+
+### Added
+
+- **Markdown and plain-text export.** Besides PDF (still the default), every export can be saved
+  as Markdown (`.md`, GitHub-flavoured: tables, fenced code with its language, task lists,
+  panels as quotes, expands as `<details>`) or plain text (`.txt`). Pick the format in the popup
+  for one export, in the preview, or as the default in Settings (managed policy:
+  `defaultOptions.format`). Cover, table of contents and page details apply to every format;
+  paper size, margins, page numbers, live render, wide-table fitting and custom CSS are PDF-only.
+- Markdown can bundle the page images (on by default, `downloadImages`): the `.md` file and an
+  `assets/` folder come in a ZIP with relative links. Images that can't be downloaded keep their
+  Confluence URL and are listed in the export summary. Off: a single `.md` file that links to the
+  images on Confluence.
+- "One file per page (ZIP)" works for all formats: Markdown and text files are numbered in
+  page-tree order (`01-…`, `02-…`) with an optional `00-Contents` index (cover and table of contents), and links between the
+  exported pages point to the right file.
+- Markdown and text exports don't print, so Chrome shows no "started debugging this browser" bar.
+
+### Changed
+
+- The context menu items read "Export this page" / "Export this page + children" and use the
+  default format from Settings; notifications name the format ("Markdown export finished").
+
 ### Fixed
 
 - Public Confluence sites can be exported without signing in: a network hiccup no longer stops
@@ -78,5 +102,6 @@ First public release.
   Server 7.x and newer. Site access is requested at runtime, one site at a time.
 - Enterprise managed policy: `blockedSpaceKeys`, `disableLiveRender`, `maxPages`, `defaultOptions`.
 
-[Unreleased]: https://github.com/<owner>/confluence-fast-pdf-export/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/<owner>/confluence-fast-pdf-export/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/<owner>/confluence-fast-pdf-export/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/<owner>/confluence-fast-pdf-export/releases/tag/v1.0.0

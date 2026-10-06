@@ -38,7 +38,11 @@ export const UCONN: SiteInfo = {
   siteTitle: 'Confluence',
 };
 
-export const today = () => new Date().toISOString().slice(0, 10);
+/** Local date, like the filenames (`buildFilename`); `toISOString()` is UTC and differs near midnight. */
+export const today = (): string => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 /** null = reachable; otherwise why not (the tests for that site skip with this reason). */
 async function unreachable(site: SiteInfo): Promise<string | null> {

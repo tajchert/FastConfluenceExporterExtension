@@ -4,10 +4,18 @@
  * mutated in place and reported through `deps.onUpdate` after every change.
  *
  *   collecting → fetching → rendering → merging → done | error | cancelled
+ *
+ * Markdown / text (`options.format`): the same collect and fetch, then `worker/convert` in the
+ * worker tab ('rendering': "Converting to Markdown…", then image downloads), the files are read
+ * back with `worker/readOutput` and saved as one document or a ZIP. No printing, so no debugger
+ * session (no "started debugging this browser" bar) and no live render.
  */
 import type { CoverInfo, SwToWorker, SwToWorkerResponses, WorkerOp, WorkerOpResults, WorkerToSw } from '../messages';
 import { effectiveMarginsMm } from '../assemble/geometry';
 import { contentUrl } from '../confluence/url';
+import { FORMATS, convertingMessage, formatOf, isCompressible } from '../format';
+import { collectOutput } from '../output/chunks';
+import type { ZipEntry } from '../pdf/zip';
 import type { ExportFinalizeOptions, ExportFinalizeResult, FinalizeOptions, PdfMetadata } from '../pdf/merge';
 import type { PrintParams } from '../render/cdp';
 import type {
@@ -71,7 +79,8 @@ export interface RunnerDeps {
   finalizeExport(base: Uint8Array, o: ExportFinalizeOptions): Promise<ExportFinalizeResult>;
   /** Metadata for one-page documents (separate files). */
   finalizePdf(base: Uint8Array, o: FinalizeOptions): Promise<{ bytes: Uint8Array; pageCount: number }>;
-  zipFiles(files: { name: string; data: Uint8Array }[], signal?: AbortSignal): Promise<Uint8Array>;
+  /** `compress`: deflate the entry (text); others are stored. Names may contain directories. */
+  zipFiles(files: ZipEntry[], signal?: AbortSignal): Promise<Uint8Array>;
   /** Saves the file; aborting `signal` cancels the download too. */
   saveBytes(bytes: Uint8Array, filename: string, mime: string, signal?: AbortSignal): Promise<number>;
   /** Stores the request and page list once, so an interrupted export can be started again. */
@@ -250,6 +259,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
   const { signal, settings } = deps;
   const request = job.request;
   const options = request.options;
+  const format = formatOf(options);
   let tabId: number | undefined;
   let keepTab = false;
   let session: RunnerPrintSession | undefined;
@@ -268,7 +278,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
   /** Long worker operations run in the background (no message stays pending for minutes). */
   const workerOp = <O extends WorkerOp>(
     op: O,
-    msg: Extract<SwToWorker, { type: 'worker/collect' | 'worker/fetch' }>,
+    msg: Extract<SwToWorker, { type: 'worker/collect' | 'worker/fetch' | 'worker/convert' }>,
   ): Promise<WorkerOpResults[O]> => {
     if (tabId === undefined) return Promise.reject(new Error('The export tab is not open.'));
     return runWorkerOp(deps, { tabId, id: job.id, op, msg, signal, pingMs: deps.workerPingMs });
@@ -287,6 +297,13 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
         });
       } else if (job.status === 'collecting') {
         update({ throttled: false, progress: { ...job.progress, current: msg.current } });
+      } else if (job.status === 'rendering' && format !== 'pdf' && msg.total > 0) {
+        // Markdown: images being downloaded by the worker tab.
+        update({
+          throttled: false,
+          message: `Downloading images ${msg.done}/${msg.total}`,
+          progress: { done: msg.done, total: msg.total, current: msg.current, unit: 'step' },
+        });
       }
     }
   });
@@ -337,7 +354,8 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
 
     // ── 6. fetch ──
     update({ status: 'fetching', message: 'Fetching pages', progress: { done: 0, total: pages.length, unit: 'page' } });
-    const liveRequested = options.liveRender && !deps.policy.disableLiveRender;
+    // Live render prints real pages: PDF only.
+    const liveRequested = format === 'pdf' && options.liveRender && !deps.policy.disableLiveRender;
     const { results } = await workerOp('fetch', {
       type: 'worker/fetch',
       jobId: job.id,
@@ -480,6 +498,97 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
           siteTitle: request.site.siteTitle,
         }
       : null;
+
+    const finish = (filename: string, downloadId: number, bytes: number, sheetCount?: number) => {
+      const skipped = job.errors.filter((e) => e.severity === 'skipped').length;
+      update({
+        status: 'done',
+        finishedAt: deps.now(),
+        progress: { done: 1, total: 1, unit: 'step' },
+        result: { filename, downloadId, bytes, pageCount, sheetCount },
+        message: skipped ? `Saved ${filename} (${plural(skipped, 'page')} skipped)` : `Saved ${filename}`,
+      });
+    };
+
+    // ── Markdown / plain text: convert in the worker tab, no printing ──
+    if (format !== 'pdf') {
+      const info = FORMATS[format];
+      // One file per page needs pages: a selection of only whiteboards / databases / embeds (no
+      // page of their own) is written as one combined file of links instead.
+      const separate = options.separateFiles && includedContent.length > 0;
+      // A single page in separate mode is one file, like a separate PDF: no cover, no contents file.
+      const onePage = separate && includedContent.length === 1;
+      const combinedName = buildFilename({ spaceKey, title: docTitle, date: exportedAt, ext: info.ext });
+      update({ status: 'rendering', message: convertingMessage(format), progress: { done: 0, total: 1, unit: 'step' } });
+      const converted = await workerOp('convert', {
+        type: 'worker/convert',
+        jobId: job.id,
+        // Separate files: one per page (folders and other link-only items have no file of their own).
+        pageIds: (separate ? includedContent : included).map((p) => p.id),
+        allPages: pages,
+        excludeIds,
+        options,
+        // Separate files: the cover and the TOC go into a `00-Contents` index file.
+        cover: onePage ? null : cover,
+        toc: onePage ? false : options.includeToc,
+        separate,
+        baseName: combinedName.replace(/\.[^.]+$/, ''),
+        concurrency: settings.apiConcurrency,
+      });
+      check();
+      const failed = converted.failedAssets;
+      if (failed.length) {
+        const n = failed.length;
+        job.errors.push({
+          pageId: '',
+          title: 'Images',
+          message:
+            `${plural(n, 'image')} could not be downloaded (${failed[0].reason}${n > 1 ? ', …' : ''}); ` +
+            `the Markdown keeps ${n === 1 ? 'its original link' : 'their original links'}.`,
+          severity: 'degraded',
+        });
+      }
+      const entries = converted.entries;
+      if (!entries.length) throw new Error('Nothing could be converted.');
+      const single = entries.length === 1 && entries[0].kind === 'document';
+      update({
+        status: 'merging',
+        message: single ? 'Preparing the file' : 'Building the ZIP',
+        progress: { done: 0, total: 1, unit: 'step' },
+      });
+      let data: Uint8Array[] = await collectOutput(
+        entries,
+        (index, offset) => worker({ type: 'worker/readOutput', jobId: job.id, index, offset }),
+        signal,
+      );
+      check();
+      let bytes: Uint8Array;
+      let filename: string;
+      let mime: string;
+      if (single) {
+        bytes = data[0];
+        filename = separate
+          ? buildFilename({ spaceKey, title: includedContent[0]?.title || docTitle, date: exportedAt, ext: info.ext })
+          : combinedName;
+        mime = info.mime;
+      } else {
+        bytes = await abortable(
+          deps.zipFiles(
+            entries.map((e, i) => ({ name: e.path, data: data[i], compress: isCompressible(e.path) })),
+            signal,
+          ),
+          signal,
+        );
+        filename = buildFilename({ spaceKey, title: docTitle, date: exportedAt, ext: 'zip' });
+        mime = 'application/zip';
+      }
+      data = [];
+      update({ message: SAVING_MESSAGE });
+      const downloadId = await abortable(deps.saveBytes(bytes, filename, mime, signal), signal);
+      finish(filename, downloadId, bytes.length, undefined);
+      return;
+    }
+
     const params = deps.toPrintParams(options);
     const batches = chunk(included, settings.printBatchSize);
     // Chrome's footer numbers each print on its own and cannot skip the cover: with several
@@ -540,17 +649,6 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
           severity: 'degraded',
         });
       }
-    };
-
-    const finish = (filename: string, downloadId: number, bytes: number, sheetCount?: number) => {
-      const skipped = job.errors.filter((e) => e.severity === 'skipped').length;
-      update({
-        status: 'done',
-        finishedAt: deps.now(),
-        progress: { done: 1, total: 1, unit: 'step' },
-        result: { filename, downloadId, bytes, pageCount, sheetCount },
-        message: skipped ? `Saved ${filename} (${plural(skipped, 'page')} skipped)` : `Saved ${filename}`,
-      });
     };
 
     // ── FR-11: one PDF per page, zipped ──

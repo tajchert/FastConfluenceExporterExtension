@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { contentIdFromUrl, sanitizePageHtml, type SanitizeContext } from '../../lib/assemble/sanitize';
 import { hostileHtml } from '../e2e/mock-confluence/hostile.mjs';
+import { DC9_EXPAND } from './fixtures/convert';
 import {
   CODE,
   COMMENTED,
@@ -109,6 +110,36 @@ describe('sanitizePageHtml', () => {
     expect(hrefOf(root, 'Architecture')).toBe('https://acme.atlassian.net/wiki/spaces/ENG/pages/111/Architecture');
   });
 
+  it('links view-file previews to the attachment, not back to the page', () => {
+    const preview = (file: string, label: string) =>
+      `<a href="/wiki/spaces/ENG/pages/${PAGE_ID}/Checkout?preview=%2F${PAGE_ID}%2F777%2F${encodeURIComponent(file).replace(/%20/g, '+')}"><span style="display:inline-block">${label}</span></a>`;
+    const root = render(`<p>${preview('Slide Template 2025.odp', 'Slide Template…')}${preview('Notes.pdf', 'Notes.pdf')}</p>`);
+    const links = Array.from(root.querySelectorAll('a'));
+    expect(links.map((a) => a.getAttribute('href'))).toEqual([
+      `https://acme.atlassian.net/wiki/download/attachments/${PAGE_ID}/Slide%20Template%202025.odp`,
+      `https://acme.atlassian.net/wiki/download/attachments/${PAGE_ID}/Notes.pdf`,
+    ]);
+    // A truncated label becomes the file name; adjacent links get a line break between them.
+    expect(links.map((a) => a.textContent)).toEqual(['Slide Template 2025.odp', 'Notes.pdf']);
+    expect(links[0]!.nextSibling?.nodeName).toBe('BR');
+    expect(root.querySelector('[data-cf-attachment]')).toBeNull();
+  });
+
+  it('drops the empty summary and status of an anonymous single-issue Jira macro', () => {
+    const root = render(`<p><span class="jira-issue" data-jira-key="PAY-7">
+      <a href="https://jira.example.com/browse/PAY-7?src=confmacro" class="jira-issue-key"><img class="icon" src="$iconUrl"/>PAY-7</a>
+      -
+      <span class="summary"></span>
+      <span class="jira-status">( <img class="icon" src="$statusIcon"/> )</span>
+    </span> GA 4.2</p>`);
+    expect(root.querySelector('.summary')).toBeNull();
+    expect(root.querySelector('.jira-status')).toBeNull();
+    expect(root.textContent!.replace(/\s+/g, ' ').trim()).toBe('PAY-7 GA 4.2');
+    // A rendered summary and status stay.
+    const full = render(`<span class="jira-issue" data-jira-key="PAY-8"><a href="https://jira.example.com/browse/PAY-8" class="jira-issue-key">PAY-8</a> - <span class="summary">Fix it</span> <span class="jira-status">( <span class="aui-lozenge">DONE</span> )</span></span>`);
+    expect(full.textContent!.replace(/\s+/g, ' ').trim()).toBe('PAY-8 - Fix it ( DONE )');
+  });
+
   it('prefers the original image over the thumbnail and removes srcset/lazy loading', () => {
     const root = render(IMAGES);
     const img = root.querySelector('img.confluence-embedded-image')!;
@@ -131,6 +162,13 @@ describe('sanitizePageHtml', () => {
     const content = root.querySelector('.expand-content') as HTMLElement;
     expect(content.classList.contains('expand-hidden')).toBe(false);
     expect(content.getAttribute('style') || '').not.toMatch(/display/);
+  });
+
+  it('keeps the expand title that Data Center 9 puts inside a <button>', () => {
+    const root = render(DC9_EXPAND);
+    expect(root.querySelector('button')).toBeNull();
+    expect(root.querySelector('.cf-expand-title')!.textContent).toBe('Introduction');
+    expect(root.querySelector('.cf-expand-body')!.textContent).toBe('The project publishes releases.');
   });
 
   it('renders task lists and checkboxes as glyphs', () => {

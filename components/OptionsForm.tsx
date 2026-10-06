@@ -1,6 +1,7 @@
 import type { JSX } from 'preact';
 import { useId } from 'preact/hooks';
-import type { ExportOptions, Orientation, PaperSize } from '../lib/types';
+import { FORMAT_CHOICES, PDF_ONLY_OPTIONS, formatOf } from '../lib/format';
+import type { ExportFormat, ExportOptions, Orientation, PaperSize } from '../lib/types';
 import { MARGIN_PRESETS, formatMargins, marginPresetOf, type MarginPreset } from './logic';
 import { NumberField } from './NumberField';
 import { Select, type SelectOption } from './Select';
@@ -17,17 +18,47 @@ type BoolKey = {
   [K in keyof ExportOptions]: ExportOptions[K] extends boolean ? K : never;
 }[keyof ExportOptions];
 
-const TOGGLES: { key: BoolKey; label: string; desc: string; group: 'content' | 'output' }[] = [
-  { key: 'includeCover', label: 'Cover page', desc: 'Title, source, date, author and page count', group: 'content' },
-  { key: 'includeToc', label: 'Table of contents', desc: 'Clickable entries for every page', group: 'content' },
+type Text = string | ((f: ExportFormat) => string);
+
+const TOGGLES: { key: BoolKey; label: Text; desc: Text; group: 'content' | 'output' }[] = [
+  {
+    key: 'includeCover',
+    label: 'Cover page',
+    desc: (f) =>
+      f === 'markdown'
+        ? 'Front matter with title, source, date, author and page count'
+        : f === 'text'
+          ? 'Header with title, source, date, author and page count'
+          : 'Title, source, date, author and page count',
+    group: 'content',
+  },
+  {
+    key: 'includeToc',
+    label: 'Table of contents',
+    desc: (f) => (f === 'pdf' ? 'Clickable entries for every page' : f === 'markdown' ? 'Linked list of every page' : 'List of every page'),
+    group: 'content',
+  },
   { key: 'includePageMeta', label: 'Page details', desc: 'Breadcrumb, last updated and a link to the original', group: 'content' },
   { key: 'pageNumbers', label: 'Page numbers', desc: 'Shown in the footer', group: 'content' },
   { key: 'includeComments', label: 'Comment highlights', desc: 'Keep inline comment markers in the text', group: 'content' },
   { key: 'shrinkWideTables', label: 'Fit wide tables', desc: 'Shrink tables that are wider than the page', group: 'content' },
   { key: 'liveRender', label: 'Live render (slow)', desc: 'Print pages with diagrams or charts from the real Confluence page', group: 'output' },
-  { key: 'separateFiles', label: 'Separate PDFs (ZIP)', desc: 'One PDF per page, bundled in a ZIP file', group: 'output' },
+  {
+    key: 'downloadImages',
+    label: 'Include images (ZIP)',
+    desc: 'Bundle page images with the Markdown in a ZIP. Off: images link to Confluence',
+    group: 'output',
+  },
+  {
+    key: 'separateFiles',
+    label: (f) => (f === 'pdf' ? 'One PDF per page (ZIP)' : 'One file per page (ZIP)'),
+    desc: (f) => `One ${f === 'pdf' ? 'PDF' : f === 'markdown' ? 'Markdown' : 'text'} file per page, bundled in a ZIP file`,
+    group: 'output',
+  },
   { key: 'includeArchived', label: 'Include archived pages', desc: 'Archived pages are skipped by default', group: 'output' },
 ];
+
+const text = (t: Text, f: ExportFormat): string => (typeof t === 'string' ? t : t(f));
 
 /** Radio group styled as a segmented control. */
 export function Segmented<V extends string>({
@@ -80,6 +111,17 @@ export function OptionsForm({ value, onChange, variant, locked, hide = [] }: Opt
   const set = <K extends keyof ExportOptions>(key: K, v: ExportOptions[K]) => onChange({ ...value, [key]: v });
   const isLocked = (k: keyof ExportOptions) => locked?.has(k) ?? false;
   const preset = marginPresetOf(value.marginsMm);
+  const format = formatOf(value);
+  const pdf = format === 'pdf';
+  // Per export (preview): PDF-only controls are hidden for Markdown / text. In the settings they
+  // stay editable (they are the defaults for PDF exports) under a "PDF layout" hint.
+  const hidePdfOnly = !pdf && variant === 'preview';
+  const hidden = (k: keyof ExportOptions) =>
+    hide.includes(k) || (hidePdfOnly && PDF_ONLY_OPTIONS.includes(k)) || (k === 'downloadImages' && format !== 'markdown');
+  // Settings with a Markdown / text default: the PDF-only toggles move into the "PDF layout" group.
+  const pdfGroupToggles = !pdf && variant === 'settings';
+  const inGroup = (group: 'content' | 'output') => (t: (typeof TOGGLES)[number]) =>
+    t.group === group && !(pdfGroupToggles && PDF_ONLY_OPTIONS.includes(t.key));
 
   const presetOptions: SelectOption<MarginPreset>[] = [
     ...(Object.keys(MARGIN_PRESETS) as (keyof typeof MARGIN_PRESETS)[]).map((k) => ({
@@ -92,13 +134,24 @@ export function OptionsForm({ value, onChange, variant, locked, hide = [] }: Opt
   ];
 
   const toggle = (t: (typeof TOGGLES)[number]) => {
-    if (hide.includes(t.key)) return null;
-    const zipDisables = value.separateFiles && (t.key === 'includeCover' || t.key === 'includeToc');
+    if (hidden(t.key)) return null;
+    // Separate PDFs have no cover and no TOC; a Markdown / text ZIP puts both into a contents file.
+    const zipDisables = value.separateFiles && pdf && (t.key === 'includeCover' || t.key === 'includeToc');
+    const zipToc = value.separateFiles && t.key === 'includeToc' && !pdf;
+    const zipCover = value.separateFiles && t.key === 'includeCover' && !pdf;
     return (
       <Toggle
         key={t.key}
-        label={t.label}
-        description={zipDisables ? 'Not used with separate PDFs' : t.desc}
+        label={text(t.label, format)}
+        description={
+          zipDisables
+            ? 'Not used with separate PDFs'
+            : zipToc
+              ? 'A contents file that links to every page'
+              : zipCover
+                ? 'Export details at the top of the contents file'
+                : text(t.desc, format)
+        }
         checked={value[t.key]}
         locked={isLocked(t.key)}
         disabled={zipDisables}
@@ -107,8 +160,8 @@ export function OptionsForm({ value, onChange, variant, locked, hide = [] }: Opt
     );
   };
 
-  return (
-    <div class={`options-form options-${variant}`}>
+  const layout = (
+    <>
       <div class="form-row">
         <Select
           label="Paper size"
@@ -170,14 +223,45 @@ export function OptionsForm({ value, onChange, variant, locked, hide = [] }: Opt
           </div>
         </fieldset>
       )}
+    </>
+  );
+
+  return (
+    <div class={`options-form options-${variant}`}>
+      {hide.includes('format') ? null : (
+        <Segmented<ExportFormat>
+          label="Format"
+          value={format}
+          disabled={isLocked('format')}
+          options={FORMAT_CHOICES}
+          onChange={(v) => set('format', v)}
+        />
+      )}
+
+      {hidePdfOnly ? (
+        <p class="field-hint format-hint">
+          Paper size, margins, page numbers and live render apply to PDF only.
+        </p>
+      ) : pdf ? (
+        layout
+      ) : (
+        <div class="pdf-layout" role="group" aria-label="PDF layout">
+          <div class="group-label">PDF layout</div>
+          <p class="field-hint format-hint">Used when you export as PDF.</p>
+          {layout}
+          <div class="toggle-group" role="group" aria-label="PDF options">
+            {TOGGLES.filter((t) => PDF_ONLY_OPTIONS.includes(t.key)).map(toggle)}
+          </div>
+        </div>
+      )}
 
       <div class="toggle-group" role="group" aria-label="Content">
         <div class="group-label">Content</div>
-        {TOGGLES.filter((t) => t.group === 'content').map(toggle)}
+        {TOGGLES.filter(inGroup('content')).map(toggle)}
       </div>
       <div class="toggle-group" role="group" aria-label="Output">
         <div class="group-label">Output</div>
-        {TOGGLES.filter((t) => t.group === 'output').map(toggle)}
+        {TOGGLES.filter(inGroup('output')).map(toggle)}
       </div>
     </div>
   );

@@ -1,5 +1,5 @@
 /**
- * Long worker-tab operations (`worker/collect`, `worker/fetch`) run in the background: the worker
+ * Long worker-tab operations (`worker/collect`, `worker/fetch`, `worker/convert`) run in the background: the worker
  * answers `{ started: true }` at once and later sends a `worker/done` notification. Waiting on
  * one tabs.sendMessage for minutes would hit Chrome's 5-minute limit for a single service-worker
  * event or API call. This helper starts such an operation and waits for its outcome, while
@@ -41,7 +41,7 @@ export function runWorkerOp<O extends WorkerOp>(
     tabId: number;
     id: string;
     op: O;
-    msg: Extract<SwToWorker, { type: 'worker/collect' | 'worker/fetch' }>;
+    msg: Extract<SwToWorker, { type: 'worker/collect' | 'worker/fetch' | 'worker/convert' }>;
     signal?: AbortSignal;
     pingMs?: number;
   },

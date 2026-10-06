@@ -4,12 +4,18 @@
  * Pages are chosen to be small and stable; assertions check structure and ids, not text.
  */
 import type { Request } from '@playwright/test';
-import type { ExportJobState } from '../../lib/types';
+import { unzipSync } from 'fflate';
+import fs from 'node:fs';
+import path from 'node:path';
+import type { ExportJobState, PageRef } from '../../lib/types';
 import { links, loadPdf, namedDestinations, readOutline } from '../e2e/pdf';
-import { APACHE, expect, expectTreeOrder, outlineHasTree, imageErrors, liveRequest, test, today, treeOfPages } from './fixtures';
+import { APACHE, expect, expectTreeOrder, outlineHasTree, imageErrors, liveRequest, options, test, today, treeOfPages } from './fixtures';
 
 const COC_HOME = { id: '315494566', title: 'Community Over Code Home', spaceKey: 'COC' };
 const COC_HOME_URL = `${APACHE.baseUrl}/spaces/COC/pages/315494566/Community+Over+Code+Home`;
+/** COMDEV, unchanged survey results with 11 attachment images. */
+const SURVEY = { id: '67635266', title: 'ASF Committer Diversity Survey - 2016', spaceKey: 'COMDEV' };
+const SURVEY_URL = `${APACHE.baseUrl}/pages/viewpage.action?pageId=${SURVEY.id}`;
 
 test.beforeEach(({ sites }) => {
   test.skip(!!sites.apache, `cwiki.apache.org is not reachable (${sites.apache})`);
@@ -116,4 +122,59 @@ test('preview lists a subtree with breadcrumbs before exporting', async ({ ext }
   // No export here: the list itself is what this test checks.
   const jobs = await ext.call<ExportJobState[]>({ type: 'job/list' });
   expect(jobs.filter((j) => j.request.root.id === COC_HOME.id && j.request.mode === 'subtree')).toEqual([]);
+});
+
+test('Markdown with images: COC home + an image page → ZIP with one .md and the downloaded attachments', async ({ ext }, testInfo) => {
+  // The COC home page has no images, so the export adds one small, long-stable COMDEV page with
+  // 11 attachment PNGs (~350 KB in all; DC `download/attachments/embedded-page/…` URLs).
+  const pages: PageRef[] = [
+    { ...COC_HOME, type: 'page', depth: 0, url: COC_HOME_URL, reason: 'selected' },
+    { ...SURVEY, type: 'page', depth: 0, url: SURVEY_URL, reason: 'selected' },
+  ];
+  const { job, file } = await ext.exportAndDownload(
+    liveRequest(APACHE, {
+      mode: 'selection',
+      selectedIds: pages.map((p) => p.id),
+      root: { id: COC_HOME.id, type: 'page', title: COC_HOME.title, spaceKey: 'COC' },
+      options: options({ format: 'markdown', downloadImages: true }),
+    }),
+    pages,
+    120_000,
+  );
+  fs.writeFileSync(testInfo.outputPath(job.result!.filename), file.bytes);
+  expect(job.errors, 'every image downloaded').toEqual([]);
+  expect(job.result!.filename).toBe(`COC_${COC_HOME.title}_${today()}.zip`);
+  expect(await ext.debuggerAttachedTabs()).toEqual([]);
+
+  const entries = unzipSync(file.bytes);
+  const names = Object.keys(entries);
+  expect(names.filter((n) => n.endsWith('.md'))).toEqual([`COC_${COC_HOME.title}_${today()}.md`]);
+  const assets = names.filter((n) => n.startsWith(`assets/${SURVEY.id}/`));
+  expect(assets.length).toBeGreaterThanOrEqual(5);
+  expect(names.filter((n) => !n.endsWith('.md') && !assets.includes(n))).toEqual([]);
+  for (const a of assets) expect([...entries[a]!.slice(0, 4)], a).toEqual([0x89, 0x50, 0x4e, 0x47]); // real PNGs, not HTML
+  fs.mkdirSync(testInfo.outputPath('unzipped/assets'), { recursive: true });
+  for (const n of names) {
+    fs.mkdirSync(path.dirname(testInfo.outputPath('unzipped', n)), { recursive: true });
+    fs.writeFileSync(testInfo.outputPath('unzipped', n), entries[n]!);
+  }
+
+  const md = new TextDecoder('utf-8', { fatal: true }).decode(entries[`COC_${COC_HOME.title}_${today()}.md`]!);
+  // Cover as YAML front matter, TOC links to both pages, an explicit anchor before each title.
+  expect(md.startsWith(`---\ntitle: "${COC_HOME.title}"\n`)).toBe(true);
+  expect(md).toContain(`- [${COC_HOME.title}](#p-${COC_HOME.id})`);
+  expect(md).toContain(`(#p-${SURVEY.id})`);
+  for (const p of pages) expect(md).toContain(`<a id="p-${p.id}"></a>\n# `);
+  // The child-pages macro of the home page is a nested list of links.
+  expect(md).toMatch(/^- \[[^\]]+\]\(https:\/\/cwiki\.apache\.org\/confluence\/spaces\/COC\/pages\/\d+\/[^)]+\)\n {2}- \[/m);
+  // Every relative image reference resolves to a file in the ZIP; none points back at Confluence.
+  const refs = [...md.matchAll(/!\[[^\]]*\]\((<[^>]+>|[^)\s]+)/g)].map((m) => (m[1]!.startsWith('<') ? m[1]!.slice(1, -1) : m[1]!));
+  expect(refs.filter((r) => /^[a-z][a-z0-9+.-]*:/i.test(r))).toEqual([]);
+  expect(refs.length).toBeGreaterThanOrEqual(assets.length);
+  for (const r of refs) expect(names, r).toContain(decodeURIComponent(r));
+  // Clean Markdown: no leftover markup wrappers, no trailing spaces, no blank-line runs, one final newline.
+  expect(md).not.toMatch(/<\/?(div|span|p|img|script|style)\b/i);
+  expect(md).not.toMatch(/[ \t]+\n/);
+  expect(md).not.toMatch(/\n{4,}/);
+  expect(md.endsWith('\n') && !md.endsWith('\n\n')).toBe(true);
 });

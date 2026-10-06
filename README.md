@@ -6,8 +6,8 @@
 
 <p align="center">
   Export one Confluence page, a whole page tree, a folder or a page with everything it links to
-  into <strong>one clean, searchable PDF</strong>. It runs in your browser and uses your existing
-  Confluence session.
+  into <strong>one clean, searchable PDF</strong> (or Markdown, or plain text). It runs in your
+  browser and uses your existing Confluence session.
 </p>
 
 > "Confluence" is a trademark of Atlassian. This extension is not affiliated with or endorsed by Atlassian.
@@ -22,6 +22,9 @@ pages into one document.
 
 The PDF is a real **vector PDF**: you can select and search the text, links are clickable,
 images keep their original resolution, and the PDF has a cover page, a table of contents and bookmarks.
+
+Need the content somewhere else (a Git repository, a static site, an LLM prompt, a ticket)? Export
+the same pages as **Markdown** or **plain text** instead.
 
 ## Features
 
@@ -52,9 +55,26 @@ its breadcrumb and a checkbox so you can drop pages. You get a warning when an e
 - **Options**: paper size (A4, Letter, Legal, A3), orientation, margins, and toggles for the cover, TOC,
   page header blocks, page numbers, inline comment highlights, archived pages and shrinking wide
   tables. You can also add custom CSS for your own branding.
-- **Separate files**: one PDF per page, bundled in a ZIP, as an alternative to one combined PDF.
-- **Filenames** look like `{SPACE}_{Root page title}_{YYYY-MM-DD}.pdf`. Files are saved through
-  Chrome's downloads, so your "Ask where to save each file" setting is respected.
+- **Separate files**: one file per page, bundled in a ZIP, as an alternative to one combined document.
+- **Filenames** look like `{SPACE}_{Root page title}_{YYYY-MM-DD}.pdf` (`.md`, `.txt` or `.zip`).
+  Files are saved through Chrome's downloads, so your "Ask where to save each file" setting is respected.
+
+**Formats**
+
+PDF is the default. Pick another format in the popup (for one export), in the preview, or as the
+default in the options.
+
+| Format | What you get |
+|---|---|
+| **PDF** | One vector PDF (or one per page in a ZIP), as described above. |
+| **Markdown** (`.md`) | GitHub-flavoured Markdown: headings, tables (complex tables stay as clean HTML tables), fenced code blocks with their language, task lists, panels as quotes (`**Note:** …`), expand macros as `<details>`, status lozenges as `` `DONE` ``. The cover becomes YAML front matter, the TOC a nested list of links. With **Include images** (default) the `.md` file and an `assets/` folder come in a ZIP with relative image links; without it you get a single `.md` file that links to the images on Confluence. |
+| **Text** (`.txt`) | Readable UTF-8 plain text: underlined titles, indented lists and code, tables as aligned columns, links as `text (url)`. Images become `[Image: name]`. |
+
+Links between exported pages stay internal in every format (anchors in one document, relative
+file links with one file per page). Content that can't be converted becomes a visible note with a
+link to Confluence. Paper size, margins, page numbers, live render, wide-table fitting and custom
+CSS only apply to PDF. Markdown and text exports don't print anything, so Chrome shows no
+"started debugging this browser" bar for them.
 
 **Fidelity**
 
@@ -70,7 +90,8 @@ its breadcrumb and a checkbox so you can drop pages. You get a warning when an e
 
 **Convenience**
 
-- **Context menu** on links to Confluence pages: *Export this page to PDF* and *Export this page + children*.
+- **Context menu** on links to Confluence pages: *Export this page* and *Export this page + children*
+  (in your default format).
   It appears on Confluence-shaped links (`/wiki/…`, `*.atlassian.net`, `viewpage.action`) and on any
   page link of a site you already allowed. For a site you have not allowed yet, the menu opens the
   export page, which asks for access only after showing you which site it is.
@@ -110,8 +131,10 @@ its breadcrumb and a checkbox so you can drop pages. You get a warning when an e
 Behind the scenes, the extension opens a background tab on a lightweight Confluence API URL on
 the same site. It fetches the pages there, assembles one print-ready document and prints it to
 PDF with Chrome's own PDF engine (`Page.printToPDF` through `chrome.debugger`). Bookmarks,
-metadata and any live-rendered pages are added with [pdf-lib](https://pdf-lib.js.org/). The
-background tab closes when the export is done.
+metadata and any live-rendered pages are added with [pdf-lib](https://pdf-lib.js.org/). For
+Markdown and text, the same tab converts the pages instead (with
+[Turndown](https://github.com/mixmark-io/turndown) for Markdown) and, for Markdown with images,
+downloads the page images; nothing is printed. The background tab closes when the export is done.
 
 ## Supported Confluence
 
@@ -207,11 +230,11 @@ tests/         unit (Vitest), e2e (Playwright + mock Confluence) and live (Playw
 | `activeTab` | Reads the URL and Confluence page information of the current tab, only when you click the icon, use the shortcut or use the context menu. |
 | `scripting` | Injects the extension's own bundled scripts (no remote code) into Confluence tabs on sites you allowed: to detect the page, fetch content and assemble the print document. |
 | `debugger` | Prints the assembled document to a vector PDF with Chrome's `Page.printToPDF`. Without it, every export would need the print dialog. The extension attaches only to tabs it opened itself and detaches right after printing. |
-| `downloads` | Saves the finished PDF or ZIP to your downloads folder. |
+| `downloads` | Saves the finished PDF, Markdown or text file (or ZIP) to your downloads folder. |
 | `storage` | Keeps your settings (synced by Chrome if you use Chrome Sync), the progress of a running export (session-only), and reads managed policy set by an administrator. |
-| `offscreen` | The background service worker can't create file URLs, so a hidden extension page turns the PDF bytes into a downloadable file. |
+| `offscreen` | The background service worker can't create file URLs, so a hidden extension page turns the finished PDF, Markdown, text or ZIP bytes into a downloadable file. |
 | `notifications` | Tells you when an export has finished or failed. |
-| `contextMenus` | Adds "Export this page to PDF" and "Export this page + children" to the menu you get when you right-click a Confluence link. |
+| `contextMenus` | Adds "Export this page" and "Export this page + children" to the menu you get when you right-click a Confluence link. |
 | Optional host access (`https://*/*`, `http://*/*`) | Confluence can run on any domain (Atlassian Cloud, custom domains, on-premise Data Center, sometimes plain HTTP inside company networks). Access is requested **one site at a time**, only when you export from that site. |
 
 The extension does **not** request the `tabs`, `cookies`, `history`, `webRequest` or "all sites" permissions.
@@ -221,7 +244,7 @@ The extension does **not** request the `tabs`, `cookies`, `history`, `webRequest
 - **Debugger banner.** While a PDF is printing, Chrome shows a bar saying that *"Fast PDF Export
   for Confluence" started debugging this browser*. It goes away when printing is done. This is how
   Chrome signals `chrome.debugger` use and the extension can't hide it. Do not click "Cancel" on
-  the bar during an export, because that stops the print.
+  the bar during an export, because that stops the print. Markdown and text exports never show it.
 - **Diagrams from Connect/Forge apps** (draw.io, Gliffy, Lucidchart, charts, roadmaps and similar)
   are drawn in the browser by those apps and are usually missing from Confluence's static export
   format. Turn on **Live render** to include them. Live render is slower (a few seconds per page)

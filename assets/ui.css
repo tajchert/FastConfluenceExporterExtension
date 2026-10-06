@@ -909,6 +909,25 @@ fieldset:disabled .segment {
   flex-direction: column;
   gap: 14px;
 }
+.format-hint {
+  margin: -6px 0 0;
+}
+.pdf-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 2px;
+}
+.pdf-layout .format-hint {
+  margin: -8px 0 0;
+}
+.popup-format {
+  margin-bottom: 8px;
+}
+.popup-format .segment {
+  height: 26px;
+  padding: 0 10px;
+}
 .form-row {
   display: flex;
   gap: 12px;

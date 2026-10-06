@@ -27,7 +27,11 @@ const TITLES: Record<string, string> = {
   502: 'UI Guidelines',
 };
 
-const today = () => new Date().toISOString().slice(0, 10);
+/** Local date, like the filenames (`buildFilename`); `toISOString()` is UTC and differs near midnight. */
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 function cloudRequest(cloud: MockConfluence, over: Partial<ExportRequest> & Pick<ExportRequest, 'mode' | 'root'>): ExportRequest {
   return {
@@ -298,7 +302,7 @@ test('(g2) popup: probes the active Confluence tab and exports "This page"', asy
   await expect(popup.locator('.ctx-title')).toHaveText('Release Notes');
   await expect(popup.locator('.ctx-meta')).toContainText('Space TEST');
   await expect(popup.getByRole('radio', { name: 'This page', exact: true })).toBeChecked();
-  await popup.getByRole('button', { name: 'Export' }).click();
+  await popup.getByRole('button', { name: 'Export PDF' }).click();
   await expect(popup.getByText(/Release Notes_\d{4}-\d{2}-\d{2}\.pdf/)).toBeVisible({ timeout: 30_000 });
 
   const [latest] = await ext.call<ExportJobState[]>({ type: 'job/list' });
@@ -342,7 +346,7 @@ test('(h2) Data Center popup probe: detects flavour, context path and page from 
   await expect(popup.locator('.ctx-title')).toHaveText('DC Child B');
   await expect(popup.locator('.ctx-meta')).toContainText('Space DOC');
   await popup.getByRole('radio', { name: 'This page', exact: true }).check();
-  await popup.getByRole('button', { name: 'Export' }).click();
+  await popup.getByRole('button', { name: 'Export PDF' }).click();
   await expect(popup.getByText(/DOC_DC Child B_\d{4}-\d{2}-\d{2}\.pdf/)).toBeVisible({ timeout: 30_000 });
   const [latest] = await ext.call<ExportJobState[]>({ type: 'job/list' });
   expect(latest.request.site).toMatchObject({ origin: dc.origin, baseUrl: dc.baseUrl, contextPath: '/confluence', flavour: 'server' });

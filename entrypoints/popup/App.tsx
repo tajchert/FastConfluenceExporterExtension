@@ -8,6 +8,8 @@ import { JobProgress } from '../../components/JobProgress';
 import { formatDate, isJobActive, isRestrictedUrl, plural, TYPE_LABEL } from '../../components/logic';
 import type { PendingStartPayload } from '../../lib/messages';
 import { Notice } from '../../components/Notice';
+import { Segmented } from '../../components/OptionsForm';
+import { FORMAT_CHOICES, FORMATS, formatOf } from '../../lib/format';
 import { Select } from '../../components/Select';
 import { Toggle } from '../../components/Toggle';
 import { probePage } from '../../lib/confluence/detect';
@@ -15,7 +17,7 @@ import type { ProbeResult } from '../../lib/messages';
 import { hasSiteAccess, requestSiteAccess } from '../../lib/permissions';
 import { callSw } from '../../lib/rpc';
 import { loadPolicy, loadSettings } from '../../lib/settings';
-import type { ExportJobState, ExportMode, ExportRequest, ManagedPolicy, PageContext, Settings } from '../../lib/types';
+import type { ExportFormat, ExportJobState, ExportMode, ExportRequest, ManagedPolicy, PageContext, Settings } from '../../lib/types';
 import {
   LINK_DEPTHS,
   SUBTREE_DEPTHS,
@@ -176,6 +178,8 @@ function Ready({
   const [cover, setCover] = useState(settings.defaults.includeCover);
   const [toc, setToc] = useState(settings.defaults.includeToc);
   const [live, setLive] = useState(settings.defaults.liveRender && !liveLocked);
+  // Applies to this export only; the default comes from the settings.
+  const [format, setFormat] = useState<ExportFormat>(formatOf(settings.defaults));
   const [access, setAccess] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -198,10 +202,16 @@ function Ready({
         mode: m,
         depth,
         linkDepth,
-        options: { ...settings.defaults, includeCover: cover, includeToc: toc, liveRender: live && !liveLocked },
+        options: {
+          ...settings.defaults,
+          format,
+          includeCover: cover,
+          includeToc: toc,
+          liveRender: format === 'pdf' && live && !liveLocked,
+        },
         sourceTabId: tabId,
       }),
-    [ctx, depth, linkDepth, settings, cover, toc, live, liveLocked, tabId],
+    [ctx, depth, linkDepth, settings, format, cover, toc, live, liveLocked, tabId],
   );
 
   // Page count for "Preview (N pages)", only with site access (the collector runs in a background
@@ -354,16 +364,21 @@ function Ready({
           </section>
 
           <section class="popup-section">
+            <div class="popup-format">
+              <Segmented<ExportFormat> label="Format" value={format} options={FORMAT_CHOICES} onChange={setFormat} />
+            </div>
             <div class="quick-toggles">
               <Toggle appearance="checkbox" label="Cover" checked={cover} onChange={setCover} />
               <Toggle appearance="checkbox" label="TOC" checked={toc} onChange={setToc} />
-              <Toggle
-                appearance="checkbox"
-                label="Live render (slow)"
-                checked={live}
-                locked={liveLocked}
-                onChange={setLive}
-              />
+              {format === 'pdf' ? (
+                <Toggle
+                  appearance="checkbox"
+                  label="Live render (slow)"
+                  checked={live}
+                  locked={liveLocked}
+                  onChange={setLive}
+                />
+              ) : null}
             </div>
             {error ? (
               <div style={{ marginTop: '10px' }}>
@@ -384,7 +399,7 @@ function Ready({
                 </Button>
               ) : (
                 <Button variant="primary" icon="download" loading={busy} onClick={onExport}>
-                  Export
+                  {`Export ${format === 'text' ? 'text' : FORMATS[format].label}`}
                 </Button>
               )}
             </div>

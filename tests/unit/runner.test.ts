@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SwToWorker, WorkerToSw } from '../../lib/messages';
+import type { ConvertOpResult, OutputEntry, SwToWorker, WorkerToSw } from '../../lib/messages';
+import { readOutputChunks } from '../../lib/output/chunks';
+import type { ZipEntry } from '../../lib/pdf/zip';
 import type { ExportFinalizeOptions, FinalizeOptions } from '../../lib/pdf/merge';
 import type { PrintParams } from '../../lib/render/cdp';
 import {
@@ -75,6 +77,7 @@ interface Harness {
   prints: PrintParams[];
   sessions: number;
   zipped: string[][];
+  zipEntries: ZipEntry[][];
   saved: { bytes: Uint8Array; filename: string; mime: string; signal?: AbortSignal }[];
   finalizeCalls: { base: Uint8Array; o: ExportFinalizeOptions }[];
   pageFinalizeCalls: { base: Uint8Array; o: FinalizeOptions }[];
@@ -93,7 +96,16 @@ function harness(opts: {
   unplacedLive?: string[];
   onAssemble?: (msg: Extract<SwToWorker, { type: 'worker/assemble' }>) => void;
   /** Answer for a background worker operation: default = success. */
-  workerOp?: (msg: Extract<SwToWorker, { type: 'worker/collect' | 'worker/fetch' }>) => Partial<Extract<WorkerToSw, { type: 'worker/done' }>> | null;
+  workerOp?: (msg: Extract<SwToWorker, { type: 'worker/collect' | 'worker/fetch' | 'worker/convert' }>) => Partial<Extract<WorkerToSw, { type: 'worker/done' }>> | null;
+  /** Output of `worker/convert` (Markdown / text). Default: one document named after baseName. */
+  convert?: (msg: Extract<SwToWorker, { type: 'worker/convert' }>) => {
+    files: { path: string; text: string }[];
+    assets?: { path: string; bytes: Uint8Array }[];
+    failedAssets?: ConvertOpResult['failedAssets'];
+    placeholders?: number;
+  };
+  /** Max bytes per `worker/readOutput` answer (tests the chunking). */
+  readMaxBytes?: number;
 } = {}): Harness {
   const calls: SwToWorker[] = [];
   const statuses: JobStatus[] = [];
@@ -106,7 +118,9 @@ function harness(opts: {
   const controller = new AbortController();
   let printCount = 0;
   const zipped: string[][] = [];
-  const h = { sessions: 0, zipped } as Harness;
+  const zipEntries: ZipEntry[][] = [];
+  const h = { sessions: 0, zipped, zipEntries } as Harness;
+  let output: Uint8Array[] = [];
   const emit = (m: WorkerToSw) => {
     if (m.type === 'worker/ready') return;
     for (const l of [...(listeners.get(m.jobId) ?? [])]) l(m);
@@ -140,6 +154,31 @@ function harness(opts: {
           }
           return { started: true };
         }
+        case 'worker/convert': {
+          const ext = msg.options.format === 'markdown' ? 'md' : 'txt';
+          const out = opts.convert?.(msg) ?? { files: [{ path: `${msg.baseName}.${ext}`, text: `# Ünïcode ✓ ${msg.pageIds.join(',')}\n` }] };
+          const enc = new TextEncoder();
+          const entries: OutputEntry[] = [];
+          output = [];
+          for (const f of out.files) {
+            const b = enc.encode(f.text);
+            entries.push({ path: f.path, size: b.length, kind: 'document' });
+            output.push(b);
+          }
+          for (const a of out.assets ?? []) {
+            entries.push({ path: a.path, size: a.bytes.length, kind: 'asset' });
+            output.push(a.bytes);
+          }
+          emit({ type: 'worker/progress', jobId: msg.jobId, done: 1, total: 2, current: 'a.png' });
+          const result: ConvertOpResult = { entries, placeholders: out.placeholders ?? 0, failedAssets: out.failedAssets ?? [] };
+          const custom = opts.workerOp?.(msg);
+          if (custom !== null) {
+            queueMicrotask(() => emit({ type: 'worker/done', jobId: msg.jobId, op: 'convert', result, ...(custom ?? {}) }));
+          }
+          return { started: true };
+        }
+        case 'worker/readOutput':
+          return readOutputChunks(output, msg.index, msg.offset, opts.readMaxBytes ?? msg.maxBytes);
         case 'worker/assemble':
           opts.onAssemble?.(msg);
           return { imageFailures: 1, pageIds: msg.pageIds };
@@ -200,8 +239,9 @@ function harness(opts: {
       pageFinalizeCalls.push({ base, o });
       return { bytes: pdf('page'), pageCount: 1 };
     }),
-    zipFiles: vi.fn(async (files: { name: string; data: Uint8Array }[]) => {
+    zipFiles: vi.fn(async (files: ZipEntry[]) => {
       zipped.push(files.map((f) => f.name));
+      zipEntries.push(files);
       return new Uint8Array(files.length * 100);
     }),
     saveBytes: async (bytes, filename, mime, signal) => {
@@ -621,6 +661,216 @@ describe('runJob: debugger fallback and cancel', () => {
     expect(job.status).toBe('error');
     expect(job.message).toBe('assemble exploded');
     expect(job.errors.at(-1)?.severity).toBe('fatal');
+    expect(h.closed).toEqual([WORKER_TAB]);
+  });
+});
+
+describe('runJob: Markdown and text', () => {
+  const decode = (b: Uint8Array) => new TextDecoder().decode(b);
+  const converts = (h: Harness) => h.calls.filter((c): c is Extract<SwToWorker, { type: 'worker/convert' }> => c.type === 'worker/convert');
+
+  it('Markdown, combined, no images: converts in the worker and saves one UTF-8 .md file without printing', async () => {
+    const h = harness();
+    const statusMessages: string[] = [];
+    const onUpdate = h.deps.onUpdate;
+    h.deps.onUpdate = (j) => {
+      onUpdate(j);
+      if (j.message && statusMessages.at(-1) !== j.message) statusMessages.push(j.message);
+    };
+    const job = makeJob([ref('1'), ref('2', 1), ref('3', 1)], { format: 'markdown', downloadImages: false, liveRender: true });
+    await runJob(job, h.deps);
+
+    expect(job.status).toBe('done');
+    expect(h.statuses).toEqual(['collecting', 'fetching', 'rendering', 'merging', 'done']);
+    expect(statusMessages).toContain('Converting to Markdown…');
+    // No printing: no debugger session, no assemble, no live render, no PDF post-processing.
+    expect(h.sessions).toBe(0);
+    expect(h.deps.printSession).not.toHaveBeenCalled();
+    expect(assembles(h)).toHaveLength(0);
+    expect(h.deps.liveRenderPages).not.toHaveBeenCalled();
+    expect(h.deps.finalizeExport).not.toHaveBeenCalled();
+    expect(fetchCall(h)).toMatchObject({ liveRenderMacros: [], needStorage: false });
+
+    const [conv] = converts(h);
+    expect(conv).toMatchObject({
+      pageIds: ['1', '2', '3'],
+      separate: false,
+      toc: true,
+      baseName: 'ENG_Root Title_2026-10-06',
+      concurrency: DEFAULT_SETTINGS.apiConcurrency,
+      excludeIds: [],
+    });
+    expect(conv.cover).toMatchObject({ title: 'Root Title', pageCount: 3, exportedBy: 'Jane Doe' });
+    expect(conv.allPages.map((p) => p.id)).toEqual(['1', '2', '3']);
+
+    expect(h.zipped).toEqual([]);
+    expect(h.saved).toHaveLength(1);
+    expect(h.saved[0].filename).toBe('ENG_Root Title_2026-10-06.md');
+    expect(h.saved[0].mime).toBe('text/markdown;charset=utf-8');
+    expect(decode(h.saved[0].bytes)).toBe('# Ünïcode ✓ 1,2,3\n');
+    expect(job.result).toMatchObject({ filename: 'ENG_Root Title_2026-10-06.md', downloadId: 77, pageCount: 3 });
+    expect(job.result?.sheetCount).toBeUndefined();
+    expect(job.errors).toEqual([]);
+    expect(h.closed).toEqual([WORKER_TAB]);
+  });
+
+  it('plain text: .txt with a text/plain mime type', async () => {
+    const h = harness();
+    const job = makeJob([ref('1')], { format: 'text' });
+    await runJob(job, h.deps);
+    expect(job.status).toBe('done');
+    expect(h.saved[0].filename).toBe('ENG_Root Title_2026-10-06.txt');
+    expect(h.saved[0].mime).toBe('text/plain;charset=utf-8');
+    expect(h.sessions).toBe(0);
+  });
+
+  it('Markdown with images: reads the output in chunks and zips documents (deflated) with assets (stored)', async () => {
+    const png = new Uint8Array(300).map((_, i) => i % 251);
+    const h = harness({
+      readMaxBytes: 64,
+      convert: (msg) => ({
+        files: [{ path: `${msg.baseName}.md`, text: '![d](assets/1/d.png)\n' + 'x'.repeat(200) }],
+        assets: [
+          { path: 'assets/1/d.png', bytes: png },
+          { path: 'assets/2/e.svg', bytes: new TextEncoder().encode('<svg/>') },
+        ],
+      }),
+    });
+    const job = makeJob([ref('1'), ref('2', 1)], { format: 'markdown', downloadImages: true });
+    await runJob(job, h.deps);
+    expect(job.status).toBe('done');
+    const reads = h.calls.filter((c) => c.type === 'worker/readOutput');
+    expect(reads.length).toBeGreaterThan(4);
+    const [entries] = h.zipEntries;
+    expect(entries.map((e) => [e.name, e.compress])).toEqual([
+      ['ENG_Root Title_2026-10-06.md', true],
+      ['assets/1/d.png', false],
+      ['assets/2/e.svg', true],
+    ]);
+    expect(entries[1].data).toEqual(png);
+    expect(decode(entries[0].data)).toBe('![d](assets/1/d.png)\n' + 'x'.repeat(200));
+    expect(h.saved[0]).toMatchObject({ filename: 'ENG_Root Title_2026-10-06.zip', mime: 'application/zip' });
+  });
+
+  it('reports images that could not be downloaded as degraded, not fatal', async () => {
+    const h = harness({
+      convert: (msg) => ({
+        files: [{ path: `${msg.baseName}.md`, text: '![a](https://acme.atlassian.net/wiki/download/attachments/1/a.png)' }],
+        failedAssets: [
+          { url: 'https://acme.atlassian.net/wiki/download/attachments/1/a.png', path: 'assets/1/a.png', reason: 'HTTP 404' },
+          { url: 'https://acme.atlassian.net/wiki/download/attachments/1/b.png', path: 'assets/1/b.png', reason: 'timed out' },
+        ],
+      }),
+    });
+    const job = makeJob([ref('1')], { format: 'markdown' });
+    await runJob(job, h.deps);
+    expect(job.status).toBe('done');
+    expect(job.errors).toEqual([
+      expect.objectContaining({
+        title: 'Images',
+        severity: 'degraded',
+        message: expect.stringMatching(/^2 images could not be downloaded \(HTTP 404, …\); the Markdown keeps their original links\.$/),
+      }),
+    ]);
+    // Only the document is left: saved as a plain .md file.
+    expect(h.saved[0].filename).toBe('ENG_Root Title_2026-10-06.md');
+  });
+
+  it('separate files: one file per content page, NN- names in the ZIP, cover for the index file', async () => {
+    const folder = ref('f', 1, { type: 'folder', title: 'Folder' });
+    const h = harness({
+      convert: (msg) => ({
+        files: [
+          { path: '00-Contents.md', text: 'toc' },
+          ...msg.pageIds.map((id, i) => ({ path: `${String(i + 1).padStart(2, '0')}-Page ${id}.md`, text: id })),
+        ],
+      }),
+    });
+    const job = makeJob([ref('1'), folder, ref('2', 2), ref('3', 1)], { format: 'markdown', separateFiles: true });
+    await runJob(job, h.deps);
+    expect(job.status).toBe('done');
+    const [conv] = converts(h);
+    expect(conv).toMatchObject({ pageIds: ['1', '2', '3'], separate: true, cover: expect.objectContaining({ pageCount: 3 }), toc: true });
+    expect(conv.allPages.map((p) => p.id)).toEqual(['1', 'f', '2', '3']);
+    expect(h.zipped[0]).toEqual(['00-Contents.md', '01-Page 1.md', '02-Page 2.md', '03-Page 3.md']);
+    expect(h.saved[0].filename).toBe('ENG_Root Title_2026-10-06.zip');
+    expect(h.sessions).toBe(0);
+  });
+
+  it('separate files with a single page: saved as that page’s .txt', async () => {
+    const h = harness({ convert: () => ({ files: [{ path: '01-Page 1.txt', text: 'Page 1\n======\n' }] }) });
+    const job = makeJob([ref('1')], { format: 'text', separateFiles: true, includeToc: false });
+    await runJob(job, h.deps);
+    expect(h.saved[0]).toMatchObject({ filename: 'ENG_Page 1_2026-10-06.txt', mime: 'text/plain;charset=utf-8' });
+  });
+
+  it('separate files with a single page and cover/TOC on: no contents file, one .md like a separate PDF', async () => {
+    const h = harness({
+      convert: (msg) => ({
+        files: [
+          ...(msg.cover || msg.toc ? [{ path: '00-Contents.md', text: 'toc' }] : []),
+          { path: '01-Page 1.md', text: '# Page 1\n' },
+        ],
+      }),
+    });
+    const job = makeJob([ref('1')], { format: 'markdown', separateFiles: true, includeCover: true, includeToc: true });
+    await runJob(job, h.deps);
+    expect(job.status).toBe('done');
+    expect(converts(h)[0]).toMatchObject({ pageIds: ['1'], separate: true, cover: null, toc: false });
+    expect(h.zipped).toEqual([]);
+    expect(h.saved[0]).toMatchObject({ filename: 'ENG_Page 1_2026-10-06.md', mime: 'text/markdown;charset=utf-8' });
+  });
+
+  it('separate files without any regular page (only whiteboards): one combined file of links', async () => {
+    const h = harness();
+    const pages = [
+      ref('1', 0, { type: 'folder', title: 'Boards' }),
+      ref('w1', 1, { type: 'whiteboard', title: 'Board A', parentId: '1' }),
+      ref('w2', 1, { type: 'whiteboard', title: 'Board B', parentId: '1' }),
+    ];
+    const job = makeJob(pages, { format: 'text', separateFiles: true, includeCover: true, includeToc: true });
+    await runJob(job, h.deps);
+    expect(job.status).toBe('done');
+    expect(converts(h)[0]).toMatchObject({ pageIds: ['1', 'w1', 'w2'], separate: false, toc: true, cover: expect.objectContaining({ title: 'Root Title' }) });
+    expect(h.saved[0]).toMatchObject({ filename: 'ENG_Root Title_2026-10-06.txt', mime: 'text/plain;charset=utf-8' });
+  });
+
+  it('shows image download progress while converting', async () => {
+    const h = harness();
+    const seen: string[] = [];
+    const onUpdate = h.deps.onUpdate;
+    h.deps.onUpdate = (j) => {
+      onUpdate(j);
+      if (j.message) seen.push(j.message);
+    };
+    await runJob(makeJob([ref('1')], { format: 'markdown' }), h.deps);
+    expect(seen).toContain('Downloading images 1/2');
+  });
+
+  it('passes skipped pages as excluded and fails when the converter fails', async () => {
+    const h = harness({
+      infos: { '2': { ok: false, httpStatus: 404 } },
+      workerOp: (msg) => (msg.type === 'worker/convert' ? { error: 'converter exploded' } : {}),
+    });
+    const job = makeJob([ref('1'), ref('2', 1)], { format: 'markdown' });
+    await runJob(job, h.deps);
+    expect(converts(h)[0]).toMatchObject({ pageIds: ['1'], excludeIds: ['2'] });
+    expect(job.status).toBe('error');
+    expect(job.message).toBe('converter exploded');
+    expect(h.closed).toEqual([WORKER_TAB]);
+  });
+
+  it('cancels while converting: tells the worker, closes the tab, never attached a debugger', async () => {
+    const h = harness({ workerOp: (msg) => (msg.type === 'worker/convert' ? null : {}) });
+    const job = makeJob([ref('1')], { format: 'text' });
+    const run = runJob(job, h.deps);
+    await vi.waitFor(() => expect(converts(h)).toHaveLength(1));
+    h.controller.abort();
+    await run;
+    expect(job.status).toBe('cancelled');
+    expect(h.calls.some((c) => c.type === 'worker/cancel')).toBe(true);
+    expect(h.sessions).toBe(0);
+    expect(h.saved).toEqual([]);
     expect(h.closed).toEqual([WORKER_TAB]);
   });
 });

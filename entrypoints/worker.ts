@@ -10,13 +10,16 @@ import { defineUnlistedScript } from 'wxt/utils/define-unlisted-script';
 import { waitForAssets } from '../lib/assemble/assets';
 import { buildPrintDocument } from '../lib/assemble/document';
 import { detectLiveRenderMacros } from '../lib/assemble/macros';
+import { convertPages, relinkFailedAssets, type ConvertedFile } from '../lib/convert';
 import { createClient, type ConfluenceClient, type ContentSummary, type PageBody } from '../lib/confluence/client';
 import { collect } from '../lib/confluence/collect';
 import { HttpError } from '../lib/confluence/http';
 import { needsSessionCheck, readSession, sessionStillValid, type SessionState } from '../lib/confluence/session';
 import { decodeTinyCode, isSameSite, parseConfluenceUrl } from '../lib/confluence/url';
 import { LOGIN_REQUIRED_MESSAGE, NOT_PUBLIC_MESSAGE, SESSION_EXPIRED_MESSAGE } from '../lib/errors';
-import type { ResolvedContent, SwToWorker, SwToWorkerResponses, WorkerOp, WorkerToSw } from '../lib/messages';
+import type { ConvertOpResult, OutputEntry, ResolvedContent, SwToWorker, SwToWorkerResponses, WorkerOp, WorkerToSw } from '../lib/messages';
+import { downloadAssets } from '../lib/output/assets';
+import { readOutputChunks } from '../lib/output/chunks';
 import { respond } from '../lib/rpc';
 import type { ContentType, FetchedPageInfo, PageRef, SiteInfo, TreeNode } from '../lib/types';
 import { isAbortError } from '../lib/util/abort';
@@ -41,6 +44,8 @@ interface JobState {
   infos: Map<string, FetchedPageInfo>;
   /** Session at the start of the job's fetch (undefined when it could not be read). */
   session?: Promise<SessionState | undefined>;
+  /** Files of the last `worker/convert` (Markdown / text), read by the SW with `worker/readOutput`. */
+  output?: { entries: OutputEntry[]; data: Uint8Array[] };
 }
 
 class LoginRequiredError extends Error {
@@ -305,6 +310,81 @@ export default defineUnlistedScript(() => {
     return { imageFailures, pageIds: pages.map((p) => p.ref.id) };
   }
 
+  /** Pages for the assembler / converter: fetched (or link-only) refs in the given order. */
+  const pagesFor = (job: JobState, pageIds: string[], allPages: PageRef[]) => {
+    const allById = new Map(allPages.map((p) => [p.id, p]));
+    const pages: { ref: PageRef; body?: PageBody; info?: FetchedPageInfo }[] = [];
+    for (const id of pageIds) {
+      const ref = job.refs.get(id) ?? allById.get(id);
+      if (!ref) continue;
+      const info = job.infos.get(id);
+      if (info && !info.ok) continue;
+      const body = job.bodies.get(id);
+      if (!body && !LINK_ONLY_TYPES.has(ref.type)) continue; // not fetched: never emit an empty section
+      pages.push({ ref, body, info });
+    }
+    return pages;
+  };
+
+  /**
+   * Markdown / text: convert in this tab's DOM (the converter never touches the network), then
+   * download the referenced images. The result stays here until the SW reads it.
+   */
+  async function handleConvert(msg: Extract<SwToWorker, { type: 'worker/convert' }>): Promise<ConvertOpResult> {
+    const job = getJob(msg.jobId);
+    const { signal } = job.controller;
+    job.output = undefined;
+    const pages = pagesFor(job, msg.pageIds, msg.allPages).map(({ ref, body }) => ({ ref, body }));
+    // An inert document (no browsing context): elements created or imported there never load
+    // anything, so converting never requests the pages' images (they are downloaded below only
+    // when "Include images" is on), and the tab's own document stays untouched.
+    const inert = document.implementation.createHTMLDocument('cfp-convert');
+    const converted = convertPages(inert, {
+      pages,
+      allPages: msg.allPages.map((p) => job.refs.get(p.id) ?? p),
+      excludeIds: msg.excludeIds,
+      site: job.site,
+      options: msg.options,
+      cover: msg.cover,
+      toc: msg.toc,
+      generatedBy: `${PRODUCT_NAME} v${chrome.runtime.getManifest().version}`,
+      separate: msg.separate,
+      baseName: msg.baseName,
+    });
+    let files: ConvertedFile[] = converted.files;
+    const wantAssets = msg.options.format === 'markdown' && msg.options.downloadImages && converted.assets.length > 0;
+    let assetData: { path: string; bytes: Uint8Array }[] = [];
+    let failedAssets: ConvertOpResult['failedAssets'] = [];
+    if (wantAssets) {
+      const total = converted.assets.length;
+      notify({ type: 'worker/progress', jobId: msg.jobId, done: 0, total });
+      const { ok, failed } = await downloadAssets(converted.assets, {
+        concurrency: msg.concurrency,
+        allowedOrigin: job.site.origin,
+        signal,
+        onProgress: (done, n, current) => notify({ type: 'worker/progress', jobId: msg.jobId, done, total: n, current }),
+      });
+      assetData = ok.map((a) => ({ path: a.path, bytes: a.bytes }));
+      failedAssets = failed.map((f) => ({ url: f.url, path: f.path, reason: f.reason }));
+      if (failed.length) files = relinkFailedAssets(files, failed.map((f) => ({ url: f.url, path: f.path })));
+    }
+    if (signal.aborted) throw new DOMException('The export was cancelled.', 'AbortError');
+    const encoder = new TextEncoder();
+    const entries: OutputEntry[] = [];
+    const data: Uint8Array[] = [];
+    for (const f of files) {
+      const bytes = encoder.encode(f.text);
+      entries.push({ path: f.path, size: bytes.length, kind: 'document' });
+      data.push(bytes);
+    }
+    for (const a of assetData) {
+      entries.push({ path: a.path, size: a.bytes.length, kind: 'asset' });
+      data.push(a.bytes);
+    }
+    job.output = { entries, data };
+    return { entries, placeholders: converted.placeholders, failedAssets };
+  }
+
   async function handleResolve(msg: Extract<SwToWorker, { type: 'worker/resolve' }>): Promise<ResolvedContent | null> {
     const site = sameOriginSite(msg.site);
     if (!isSameSite(msg.url, site)) return null;
@@ -406,6 +486,14 @@ export default defineUnlistedScript(() => {
         return runInBackground(msg.jobId, 'fetch', () => handleFetch(msg));
       case 'worker/assemble':
         return handleAssemble(msg);
+      case 'worker/convert':
+        getJob(msg.jobId);
+        return runInBackground(msg.jobId, 'convert', () => handleConvert(msg));
+      case 'worker/readOutput': {
+        const output = getJob(msg.jobId).output;
+        if (!output) throw new Error('The converted files are no longer available. Please export again.');
+        return readOutputChunks(output.data, msg.index, msg.offset, msg.maxBytes);
+      }
       case 'worker/space': {
         try {
           const s = await sharedClient(msg.site).getSpace(msg.spaceKey);
@@ -433,6 +521,8 @@ export default defineUnlistedScript(() => {
     'worker/children',
     'worker/fetch',
     'worker/assemble',
+    'worker/convert',
+    'worker/readOutput',
     'worker/space',
     'worker/resolve',
     'worker/cancel',
