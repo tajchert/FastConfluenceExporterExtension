@@ -76,6 +76,8 @@ export interface FetchedPageInfo {
   liveRenderReasons?: string[];
   /** Content types that are exported as link-only TOC entries (whiteboards, databases, embeds). */
   linkOnly?: boolean;
+  /** Space key reported by Confluence for the fetched page (used to enforce blocked spaces). */
+  spaceKey?: string;
 }
 
 export type PaperSize = 'A4' | 'Letter' | 'Legal' | 'A3';
@@ -180,6 +182,13 @@ export interface ExportJobState {
   createdAt: number;
   finishedAt?: number;
   result?: { filename: string; downloadId?: number; bytes: number; pageCount: number; sheetCount?: number };
+  /** Non-fatal notes from collection (e.g. depth limits, unresolved links). */
+  warnings?: string[];
+  /**
+   * True when Chrome's debugger was unavailable and the system print dialog was opened on the
+   * assembled document instead (no download, no `result`).
+   */
+  printDialog?: boolean;
 }
 
 /** Lazy tree node for the manual selection picker (FR-6). */

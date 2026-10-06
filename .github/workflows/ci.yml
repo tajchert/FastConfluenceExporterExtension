@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  build:
+    name: Compile, test, build, zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # Also runs `wxt prepare` (postinstall), which generates .wxt/tsconfig.json used by tsc.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run compile
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build (Chrome)
+        run: npm run build
+
+      - name: Verify production manifest
+        run: |
+          node -e '
+            const m = require("./.output/chrome-mv3/manifest.json");
+            const fail = (msg) => { console.error("manifest check failed: " + msg); process.exit(1); };
+            if (m.manifest_version !== 3) fail("manifest_version must be 3");
+            if ((m.host_permissions ?? []).length) fail("production build must not declare host_permissions: " + JSON.stringify(m.host_permissions));
+            for (const s of [16, 32, 48, 128]) if (!m.icons?.[s]) fail("missing icon " + s);
+            console.log("manifest OK:", m.name, m.version);
+          '
+
+      - name: Zip (Chrome + Edge)
+        run: |
+          npm run zip
+          npm run zip:edge
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-zips
+          path: .output/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  audit:
+    name: npm audit (runtime deps)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # Only production dependencies end up in the extension bundle.
+      - name: Audit
+        run: npm audit --omit=dev --audit-level=moderate
+
+  e2e:
+    name: E2E (Playwright)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # hashFiles() is not available in a job-level `if`, so the suite's presence is checked here.
+      - name: Detect Playwright suite
+        id: suite
+        run: |
+          if [ -f playwright.config.ts ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "present=false" >> "$GITHUB_OUTPUT"; echo "No playwright.config.ts, skipping E2E."; fi
+      - uses: actions/setup-node@v4
+        if: steps.suite.outputs.present == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        if: steps.suite.outputs.present == 'true'
+        run: npm ci
+      - name: Install Chromium
+        if: steps.suite.outputs.present == 'true'
+        run: npx playwright install --with-deps chromium
+      # Extensions need a headed browser (or the new headless mode); xvfb covers both.
+      - name: E2E tests
+        if: steps.suite.outputs.present == 'true'
+        run: xvfb-run --auto-servernum npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure() && steps.suite.outputs.present == 'true'
+        with:
+          name: playwright-report
+          path: |
+            playwright-report
+            test-results
+          retention-days: 14

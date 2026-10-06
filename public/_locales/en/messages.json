@@ -1,7 +1,9 @@
 {
-  "extName": { "message": "Fast PDF Export for Confluence" },
-  "extShortName": { "message": "Confluence PDF" },
-  "extDescription": { "message": "Export Confluence pages, page trees, folders and linked pages into one clean PDF in seconds, right in your browser." },
-  "actionTitle": { "message": "Export to PDF" },
-  "commandExportCurrent": { "message": "Export the current Confluence page to PDF" }
+  "extName": {"message": "Fast PDF Export for Confluence"},
+  "extShortName": {"message": "Confluence PDF"},
+  "extDescription": {"message": "Export Confluence pages, page trees, folders and linked pages into one clean PDF in seconds, right in your browser."},
+  "actionTitle": {"message": "Export to PDF"},
+  "commandExportCurrent": {"message": "Export the current Confluence page to PDF"},
+  "contextMenuExportPage": {"message": "Export this page to PDF"},
+  "contextMenuExportTree": {"message": "Export this page + children to PDF"}
 }

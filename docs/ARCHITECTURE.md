@@ -69,6 +69,10 @@ not `browser.*`.
   cookies flow to images. The worker content script then replaces the document.
 - `GET {base}/rest/api/user/current` → `{displayName, publicName, accountId, …}` (Cloud);
   DC returns `{displayName, username, …}`.
+- E2E (Playwright Chromium + mock Confluence, `tests/e2e/`) confirmed: injecting `/worker.js` into the
+  JSON endpoint tab works with Chrome's JSON viewer, cookies reach API and image requests from the
+  worker tab, `printToPDF` via `chrome.debugger` emits `p-{id}` destinations and a heading outline that
+  survive batch merging and live-page inserts.
 - No draw.io / Gliffy on the spike site; their export_view output is unverified → live render
   detection is based on storage/export markers (configurable list) and must degrade gracefully.
 
@@ -95,7 +99,9 @@ Shared code lives in `lib/`; shared Preact components in `components/`; UI CSS i
    `chrome.permissions.onAdded` if the origin matches (and clears it).
 3. **Worker tab**: SW `openWorkerTab(site, nearTabId)` → inactive tab at the end of the source
    window, URL `{base}/rest/api/space?limit=1`, waits for `complete`, injects `/worker.js`,
-   pings until ready. One worker tab per job; also used by the preview for collect/tree.
+   pings until ready. `waitForTabComplete` also polls `tabs.get`: a lazily added `onUpdated`
+   listener can miss a fast page's `complete` while `tabs.get` still answers `loading` (seen in
+   real Chrome on the first export after the service worker started). One worker tab per job; also used by the preview for collect/tree.
 4. **Collect** (worker): `collect(client, request)` → ordered, de-duplicated `PageRef[]`.
 5. **Preview** (multi-page): user prunes; FR-16 thresholds (`warnPageCount`, `confirmPageCount`, managed `maxPages`).
 6. **Fetch** (worker): `fetchPages` pool (settings.apiConcurrency), 429 back-off, per-page
@@ -246,6 +252,7 @@ export interface AssembleInput {
   pages: { ref: PageRef; body?: PageBody; info?: FetchedPageInfo; live?: boolean }[]; // in order
   allPages: PageRef[]; site: SiteInfo; options: ExportOptions;
   cover: CoverInfo | null; toc: boolean; generatedBy: string; // "Fast PDF Export for Confluence v1.0.0"
+  excludeIds?: string[]; // ids of allPages not in the final PDF (left out of TOC, links stay external)
 }
 export function buildPrintDocument(doc: Document, input: AssembleInput): void; // replaces doc's <head>/<body>
 // Structure: section.cf-cover, nav.cf-toc (TOC entries use divs/links, NOT headings),
@@ -253,6 +260,11 @@ export function buildPrintDocument(doc: Document, input: AssembleInput): void; /
 // Link-only types (folder section header / whiteboard / database / embed): article with h1 + "Open in Confluence" link.
 // Live pages: header + <div class="cf-live-slot" data-page-id> (content arrives via live render).
 // Failed pages are not passed in (they are listed in the error summary instead).
+// Every document ends with a hidden `div.cf-dests` (display:none) holding `<a href="#p-{id}">` for
+// each article, so Chrome emits named destinations for every section in every print batch (§5).
+// geometry.ts (pure, shared with the SW): paperSizeMm(), effectiveMarginsMm() (bottom margin
+// raised to FOOTER_MIN_MARGIN_MM when page numbers are on) — used by buildPrintCss, toPrintParams
+// and the live-render @page rule so all printed sheets share one geometry.
 // assets.ts
 export function waitForAssets(doc: Document, timeoutMs?: number /*15000*/): Promise<{ imageFailures: number }>;
 // every <img> complete && naturalWidth>0 or replaced by a placeholder box with the filename; document.fonts.ready.
@@ -267,7 +279,8 @@ export interface PrintParams { paperWidthIn: number; paperHeightIn: number; marg
   marginLeftIn: number; marginRightIn: number; landscape: boolean; displayHeaderFooter: boolean;
   headerTemplate: string; footerTemplate: string; outline: boolean; tagged: boolean; }
 export function toPrintParams(options: ExportOptions): PrintParams;
-export function printTabToPdf(tabId: number, params: PrintParams, signal?: AbortSignal): Promise<Uint8Array>;
+export function printTabToPdf(tabId: number, params: PrintParams, signal?: AbortSignal,
+  hooks?: { beforePrint?(send: (method: string, params?: object) => Promise<unknown>): Promise<void> }): Promise<Uint8Array>;
 // attach debugger 1.3 → Page.printToPDF (preferCSSPageSize, printBackground, transferMode ReturnAsStream,
 // generateDocumentOutline/generateTaggedPDF when params say so; retry once without them if Chrome rejects)
 // → IO.read until eof → IO.close → ALWAYS detach in finally. Throws DebuggerUnavailableError when attach
@@ -287,16 +300,22 @@ export interface OutlineItem { title: string; pageIndex: number; children: Outli
 export interface PdfMetadata { title: string; author?: string; subject?: string; keywords?: string[]; creator: string; producer?: string }
 export function concatPdfs(parts: Uint8Array[]): Promise<{ bytes: Uint8Array; offsets: number[] }>;
 export function findDestinationPages(pdf: Uint8Array, names: string[]): Promise<Map<string, number>>; // named dest → 0-based page index
+/** page id → first sheet of its section: `p-{id}` destinations, falling back to top-level outline titles. Used by the runner. */
+export function findSectionStartPages(pdf: Uint8Array, pages: { id: string; title: string }[]): Promise<Map<string, number>>;
+export function readOutline(pdf: Uint8Array): Promise<OutlineItem[]>;
 export function finalizePdf(base: Uint8Array, o: {
   metadata: PdfMetadata;
-  inserts?: { afterPageIndex: number; pdf: Uint8Array }[]; // applied from last to first
+  inserts?: { afterPageIndex: number; pdf: Uint8Array }[]; // applied from last to first; -1 = at the start
   outline?: OutlineItem[];         // replaces any existing outline when given
+  stampPageNumbers?: { bottomPt?: number; fontSizePt?: number; skipFirst?: number }; // "n / N" when Chrome's footer was off
 }): Promise<{ bytes: Uint8Array; pageCount: number }>;
 export function buildOutline(pages: PageRef[], startPage: Map<string, number>): OutlineItem[]; // nested by depth
 // lib/pdf/zip.ts
 export function zipFiles(files: { name: string; data: Uint8Array }[]): Uint8Array; // fflate zipSync, unique names
 // lib/download.ts
 export function saveBytes(bytes: Uint8Array, filename: string, mime: string): Promise<number>; // downloadId
+// Resolves once the download completed; rejects with DownloadInterruptedError (code DOWNLOAD_INTERRUPTED,
+// reason e.g. USER_CANCELED) — the runner reports a dismissed "Save as" dialog as `cancelled`.
 ```
 
 ### lib (owned by the "orchestrator" agent; SW + shared)
@@ -314,6 +333,7 @@ export function listGrantedOrigins(): Promise<string[]>;
 export function removeSiteAccess(origin: string): Promise<boolean>;
 // lib/job/store.ts — chrome.storage.session persistence: saveJob, loadJob, listJobs, deleteJob, pendingStart get/set/clear
 // lib/job/runner.ts — export function runJob(job: ExportJobState, deps): Promise<void>; the state machine
+//   (live render runs BEFORE printing so a failed live page falls back to its static content)
 // lib/job/manager.ts — start/cancel/get/list, broadcast `job/update`, badge text, notifications
 // entrypoints/background.ts — wires onMessage (UiToSw), commands, contextMenus (FR-15), permissions.onAdded,
 //   startup cleanup (detach stale debuggers, close orphan worker tabs recorded in session storage)
@@ -329,13 +349,22 @@ Talks to the SW only through `callSw()` from `lib/rpc.ts` and listens for `SwBro
 ## 5. Notes & decisions
 
 - **Why a JSON URL for the worker tab**: same-origin (cookies for API + images), no app JS, no CSP.
-- **Section start pages**: every `article.cf-page` has `id="p-{id}"` and the TOC links to it, so
-  Chrome emits named destinations `p-{id}`; `findDestinationPages()` maps them to sheet indexes.
-  As a fallback (destinations missing), the worker also emits a tiny white marker text
-  `⟦cfp:{id}⟧` in each page header (font-size 1px, color white) which `merge.ts` can search for.
-- **Outline**: prefer Chrome's `generateDocumentOutline` (h1 = page titles, demoted content
-  headings nest under them). Rebuild with pdf-lib when pages were inserted/merged or Chrome
-  produced none.
+- **Section start pages**: every `article.cf-page` has `id="p-{id}"`. Chrome only emits a named
+  destination for an id that some `<a href="#id">` in the same printed document targets, so each
+  print batch ends with a hidden `div.cf-dests` linking every article (works without a TOC and in
+  batches 2+). `findSectionStartPages()` maps `p-{id}` → sheet index, falling back to matching
+  top-level outline titles (h1 = page title; cover/TOC use no headings). The white 1px marker text
+  `⟦cfp:{id}⟧` in each header is kept for debugging only (glyph-id text is not searchable).
+- **Outline**: Chrome's `generateDocumentOutline` (h1 = page titles, demoted content headings nest
+  under them). It survives `concatPdfs` (merged, offset) and live-page inserts (entries point at
+  page objects), so the runner only rebuilds it with `buildOutline()` when the PDF has none.
+- **Page numbers**: one batch without live pages → Chrome's footer template. Several batches or
+  inserted live pages → print without the footer and `finalizePdf({ stampPageNumbers })`; live
+  pages are then printed with the same (footer-sized) margins and `pageNumbers: false`.
+- **Cross-batch links** (exports > `printBatchSize` pages): Chrome drops links to ids that are not
+  in the batch being printed, so links/TOC entries to pages in another batch are lost (text kept).
+- **Service-worker lifetime**: while a job runs the manager pings `chrome.runtime.getPlatformInfo()`
+  every 20 s so silent phases (Save-as dialog, slow live renders) do not let Chrome stop the SW.
 - **Debugger fallback**: if `DebuggerUnavailableError`, activate the worker tab and call
   `window.print()` there (vector, but needs the print dialog) — spec §17.
 - **Permissions**: required `activeTab, scripting, storage, downloads, debugger, notifications,

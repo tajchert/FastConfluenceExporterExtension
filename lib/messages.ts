@@ -18,6 +18,7 @@
  * asynchronously must `return true`. Use `lib/rpc.ts` helpers rather than raw APIs.
  */
 import type {
+  ContentType,
   ExportJobState,
   ExportOptions,
   ExportRequest,
@@ -76,6 +77,7 @@ export type SwToWorker =
   | { type: 'worker/collect'; jobId?: string; request: ExportRequest }
   | {
       type: 'worker/children';
+      site: SiteInfo;
       spaceKey: string;
       spaceId?: string;
       parent?: { id: string; type: TreeNode['type'] };
@@ -84,7 +86,16 @@ export type SwToWorker =
    * Fetch export_view bodies + metadata for the given pages (pool, retry, 429 back-off) and keep
    * them in worker memory keyed by page id. Progress is reported with `worker/progress`.
    */
-  | { type: 'worker/fetch'; jobId: string; pages: PageRef[]; liveRenderMacros: string[]; concurrency: number }
+  | {
+      type: 'worker/fetch';
+      jobId: string;
+      site: SiteInfo;
+      pages: PageRef[];
+      liveRenderMacros: string[];
+      concurrency: number;
+      /** Also fetch storage format for live-render detection (only when live render is on). */
+      needStorage?: boolean;
+    }
   /**
    * Replace the worker tab's document with the assembled print document for `pageIds`
    * (in that order), then wait for images and fonts. `liveRenderIds` are emitted as a header-only
@@ -93,6 +104,7 @@ export type SwToWorker =
   | {
       type: 'worker/assemble';
       jobId: string;
+      site: SiteInfo;
       pageIds: string[];
       liveRenderIds: string[];
       allPages: PageRef[]; // the full export, for link rewriting (#p-{id}) and TOC
@@ -100,6 +112,13 @@ export type SwToWorker =
       cover: CoverInfo | null; // null = no cover in this batch
       toc: boolean;
     }
+  /** Space name for the cover / filename of 'space' exports. */
+  | { type: 'worker/space'; site: SiteInfo; spaceKey: string }
+  /**
+   * Resolve any Confluence content URL (incl. tiny links and DC `/display/KEY/Title`) to its
+   * content id. Used by the context menu. Null when the URL is not a resolvable content URL.
+   */
+  | { type: 'worker/resolve'; site: SiteInfo; url: string }
   | { type: 'worker/cancel'; jobId: string }
   /** Drop cached bodies for a job. */
   | { type: 'worker/dispose'; jobId: string };
@@ -125,8 +144,19 @@ export interface SwToWorkerResponses {
     /** Ids of pages that ended up in the document, in order. */
     pageIds: string[];
   };
+  'worker/space': { key: string; name: string; homepageId?: string } | null;
+  'worker/resolve': ResolvedContent | null;
   'worker/cancel': void;
   'worker/dispose': void;
+}
+
+export interface ResolvedContent {
+  id: string;
+  type: ContentType;
+  title: string;
+  spaceKey?: string;
+  spaceId?: string;
+  url: string;
 }
 
 /** Worker tab → service worker progress notifications (runtime.sendMessage, no response). */

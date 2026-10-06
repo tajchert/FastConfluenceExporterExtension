@@ -1,0 +1,1284 @@
+/*
+ * Print stylesheet for the assembled export document.
+ *
+ * Applies to screen and print alike so that layout measured in the worker tab (wide tables,
+ * block heights) matches the printed result. `buildPrintCss()` prepends the @page rule and the
+ * --cf-content-width / --cf-content-height variables, and appends the user's custom CSS.
+ */
+
+:root {
+  --cf-text: #172b4d;
+  --cf-text-muted: #5e6c84;
+  --cf-text-subtle: #7a869a;
+  --cf-link: #0052cc;
+  --cf-border: #c1c7d0;
+  --cf-border-light: #dfe1e6;
+  --cf-surface: #f4f5f7;
+  --cf-surface-2: #fafbfc;
+  --cf-accent: #0052cc;
+  --cf-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans", Ubuntu, Cantarell,
+    "Helvetica Neue", Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol",
+    "Noto Color Emoji";
+  --cf-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    "DejaVu Sans Mono", monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: #fff;
+}
+
+body {
+  color: var(--cf-text);
+  font-family: var(--cf-font);
+  font-size: 10.5pt;
+  line-height: 1.55;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  font-kerning: normal;
+  overflow-wrap: break-word;
+}
+
+.cf-doc {
+  width: 100%;
+}
+
+/* Screen preview (debugger fallback / window.print()): sheet-width column on a grey backdrop.
+   The content box width equals the printable width so measurements match the PDF. */
+@media screen {
+  html {
+    background: #e9ebee;
+  }
+  body {
+    background: transparent;
+    padding: 24px 0;
+  }
+  .cf-doc {
+    width: var(--cf-content-width, 180mm);
+    box-sizing: content-box;
+    margin: 0 auto;
+    padding: 16mm;
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(9, 30, 66, 0.2);
+  }
+  .cf-cover,
+  .cf-toc,
+  .cf-page + .cf-page {
+    border-top: 1px dashed var(--cf-border-light);
+  }
+}
+
+/* ───────────────────────────── generic typography ───────────────────────────── */
+
+p {
+  margin: 0 0 0.75em;
+  orphans: 3;
+  widows: 3;
+}
+
+a {
+  color: var(--cf-link);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: var(--cf-text);
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1.4em 0 0.5em;
+  break-after: avoid;
+  page-break-after: avoid;
+  break-inside: avoid;
+}
+
+h1 {
+  font-size: 22pt;
+  letter-spacing: -0.01em;
+}
+h2 {
+  font-size: 16.5pt;
+  letter-spacing: -0.005em;
+}
+h3 {
+  font-size: 13.5pt;
+}
+h4 {
+  font-size: 12pt;
+}
+h5 {
+  font-size: 11pt;
+}
+h6 {
+  font-size: 10pt;
+  color: var(--cf-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cf-content > :first-child,
+.cf-content > .cf-anchor:first-child + * {
+  margin-top: 0;
+}
+
+ul,
+ol {
+  margin: 0 0 0.75em;
+  padding-left: 1.6em;
+}
+
+li {
+  margin: 0.15em 0;
+}
+
+li > ul,
+li > ol {
+  margin: 0.15em 0;
+}
+
+li > p {
+  margin: 0 0 0.3em;
+}
+
+blockquote {
+  margin: 0.8em 0;
+  padding: 0.2em 0 0.2em 1em;
+  border-left: 3px solid var(--cf-border-light);
+  color: var(--cf-text-muted);
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--cf-border-light);
+  margin: 1.4em 0;
+}
+
+dl {
+  margin: 0 0 0.75em;
+}
+
+dt {
+  font-weight: 600;
+}
+
+dd {
+  margin: 0 0 0.4em 1.4em;
+}
+
+sub,
+sup {
+  line-height: 0;
+}
+
+mark {
+  background: #fff0b3;
+  color: inherit;
+}
+
+small {
+  font-size: 85%;
+}
+
+abbr[title] {
+  text-decoration: none;
+}
+
+/* ───────────────────────────── images ───────────────────────────── */
+
+img {
+  max-width: 100%;
+  height: auto;
+  max-height: calc(var(--cf-content-height, 260mm) - 30mm);
+  object-fit: contain;
+  break-inside: avoid;
+  vertical-align: middle;
+}
+
+.confluence-embedded-file-wrapper {
+  display: inline-block;
+  max-width: 100%;
+}
+
+.confluence-embedded-file-wrapper.image-center-wrapper,
+.image-center-wrapper {
+  display: block;
+  text-align: center;
+  margin: 0.6em 0;
+}
+
+img.image-center {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.confluence-embedded-file-wrapper.image-right-wrapper {
+  display: block;
+  text-align: right;
+}
+
+img.image-right {
+  float: right;
+  margin: 0 0 0.6em 1em;
+}
+
+img.image-left {
+  float: left;
+  margin: 0 1em 0.6em 0;
+}
+
+img.confluence-embedded-image {
+  border-radius: 2px;
+}
+
+img.confluence-thumbnail-link,
+img.confluence-embedded-image.confluence-thumbnail {
+  border: 1px solid var(--cf-border-light);
+}
+
+figure {
+  margin: 0.8em 0;
+  break-inside: avoid;
+}
+
+figcaption {
+  color: var(--cf-text-muted);
+  font-size: 8.5pt;
+  text-align: center;
+  margin-top: 0.3em;
+}
+
+/* Emoticons and emoji sized like text. */
+img.emoticon,
+img[data-emoji-id],
+img[data-emoji-shortname] {
+  height: 1.15em;
+  width: auto;
+  max-height: none;
+  vertical-align: -0.2em;
+  border: 0;
+}
+
+.cf-emoji {
+  font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", var(--cf-font);
+  font-size: 1em;
+  line-height: 1;
+}
+
+.cf-img-missing {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 45mm;
+  max-width: 100%;
+  min-height: 16mm;
+  padding: 3mm 4mm;
+  margin: 0.3em 0;
+  border: 1px dashed var(--cf-border);
+  border-radius: 3px;
+  background: var(--cf-surface-2);
+  color: var(--cf-text-muted);
+  font-size: 8.5pt;
+  line-height: 1.35;
+  text-align: left;
+  vertical-align: middle;
+  break-inside: avoid;
+}
+
+.cf-img-missing-label {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 7pt;
+  color: var(--cf-text-subtle);
+}
+
+.cf-img-missing-name {
+  word-break: break-all;
+  color: var(--cf-text);
+}
+
+.cf-img-missing-inline {
+  color: var(--cf-text-muted);
+}
+
+/* ───────────────────────────── tables ───────────────────────────── */
+
+.table-wrap {
+  margin: 0.8em 0;
+  overflow: visible !important;
+  max-width: 100%;
+}
+
+table {
+  border-collapse: collapse;
+  border-spacing: 0;
+  margin: 0.8em 0;
+  font-size: 9.5pt;
+  line-height: 1.45;
+  max-width: 100%;
+}
+
+.table-wrap > table {
+  margin: 0;
+}
+
+thead {
+  display: table-header-group;
+}
+
+tfoot {
+  display: table-footer-group;
+}
+
+tr {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+th,
+td {
+  border: 1px solid var(--cf-border);
+  padding: 5px 8px;
+  vertical-align: top;
+  text-align: left;
+}
+
+th,
+td.highlight,
+.confluenceTh {
+  background-color: var(--cf-surface);
+  font-weight: 600;
+}
+
+th > :last-child,
+td > :last-child {
+  margin-bottom: 0;
+}
+
+th > p,
+td > p {
+  margin-bottom: 0.4em;
+}
+
+td.numberingColumn {
+  color: var(--cf-text-muted);
+  text-align: right;
+  width: 1%;
+  white-space: nowrap;
+}
+
+caption {
+  caption-side: top;
+  text-align: left;
+  font-weight: 600;
+  padding-bottom: 0.3em;
+}
+
+/* Confluence cell highlight colours (when no inline background is set). */
+.highlight-grey,
+[data-highlight-colour="grey"] { background-color: #f4f5f7; }
+.highlight-red,
+[data-highlight-colour="red"] { background-color: #ffebe6; }
+.highlight-green,
+[data-highlight-colour="green"] { background-color: #e3fcef; }
+.highlight-blue,
+[data-highlight-colour="blue"] { background-color: #deebff; }
+.highlight-yellow,
+[data-highlight-colour="yellow"] { background-color: #fffae6; }
+.highlight-purple,
+[data-highlight-colour="purple"] { background-color: #eae6ff; }
+.highlight-teal,
+[data-highlight-colour="teal"] { background-color: #e6fcff; }
+
+/* Wide tables (shrinkWideTables): marked by the assembler after measuring. */
+table.cf-wide {
+  font-size: 8.5pt;
+  width: 100% !important;
+}
+
+table.cf-wide th,
+table.cf-wide td {
+  padding: 4px 5px;
+}
+
+table.cf-wide-xl {
+  font-size: 7.5pt;
+  table-layout: fixed;
+  width: 100% !important;
+}
+
+table.cf-wide-xl th,
+table.cf-wide-xl td {
+  padding: 3px 4px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0 !important;
+}
+
+table.cf-wide-xl pre,
+table.cf-wide-xl code {
+  font-size: 7pt;
+}
+
+/* Jira issues macro (static table). */
+.jira-table,
+.jira-issues {
+  margin: 0.8em 0;
+}
+
+table.aui {
+  width: 100%;
+}
+
+table.aui th {
+  white-space: nowrap;
+}
+
+td.jira-macro-table-underline-pdfexport {
+  font-size: 9pt;
+}
+
+td.jira-macro-table-underline-pdfexport img {
+  height: 16px;
+  width: 16px;
+  vertical-align: -3px;
+}
+
+.refresh-issues-bottom,
+.jira-issues .refresh-issues-bottom {
+  color: var(--cf-text-muted);
+  font-size: 8.5pt;
+  margin-top: 0.3em;
+}
+
+.jira-issue,
+.confluence-jim-macro {
+  white-space: normal;
+}
+
+.jira-issue img {
+  height: 16px;
+  width: 16px;
+  vertical-align: -3px;
+}
+
+/* ───────────────────────────── code ───────────────────────────── */
+
+code,
+kbd,
+samp,
+tt {
+  font-family: var(--cf-mono);
+  font-size: 0.88em;
+}
+
+code {
+  background: var(--cf-surface);
+  border-radius: 3px;
+  padding: 0.1em 0.3em;
+  overflow-wrap: anywhere;
+}
+
+kbd {
+  border: 1px solid var(--cf-border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  padding: 0 0.3em;
+}
+
+pre {
+  font-family: var(--cf-mono);
+  font-size: 8.5pt;
+  line-height: 1.5;
+  color: #172b4d;
+  background: var(--cf-surface);
+  border: 1px solid var(--cf-border-light);
+  border-radius: 3px;
+  padding: 8px 10px;
+  margin: 0.8em 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  tab-size: 4;
+  /* Long listings must flow across sheets (each fragment keeps its box); short ones get .cf-keep. */
+  break-inside: auto;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  overflow: visible !important;
+  max-height: none !important;
+}
+
+pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 1em;
+  border-radius: 0;
+}
+
+.code.panel,
+.preformatted.panel {
+  border-style: none !important;
+  background: transparent;
+  margin: 0.8em 0;
+  padding: 0;
+}
+
+.code.panel .codeContent,
+.code.panel .panelContent,
+.preformatted.panel .preformattedContent {
+  padding: 0;
+  background: transparent !important;
+}
+
+.code.panel pre,
+.preformatted.panel pre {
+  margin: 0;
+}
+
+.code.panel .codeHeader {
+  font-size: 8.5pt;
+  font-weight: 600;
+  color: var(--cf-text-muted);
+  background: #ebecf0;
+  border: 1px solid var(--cf-border-light);
+  border-bottom: 0;
+  border-radius: 3px 3px 0 0;
+  padding: 4px 10px;
+  break-after: avoid;
+}
+
+.code.panel .codeHeader + .codeContent pre {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+/* ───────────────────────────── panels & info macros ───────────────────────────── */
+
+.panel {
+  border: 1px solid var(--cf-border-light);
+  border-radius: 3px;
+  margin: 0.8em 0;
+  background: #fff;
+}
+
+.panel .panelHeader {
+  font-weight: 600;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--cf-border-light);
+  background: var(--cf-surface);
+  break-after: avoid;
+}
+
+.panel .panelContent {
+  padding: 8px 12px;
+}
+
+.panel .panelContent > :last-child {
+  margin-bottom: 0;
+}
+
+.confluence-information-macro,
+.panel[data-panel-type] {
+  --cf-panel-color: #0065ff;
+  --cf-panel-bg: #e9f2ff;
+  --cf-panel-glyph: "i";
+  position: relative;
+  margin: 0.9em 0;
+  padding: 8px 12px 8px 38px;
+  border: 0;
+  border-left: 4px solid var(--cf-panel-color);
+  border-radius: 3px;
+  background: var(--cf-panel-bg);
+}
+
+.confluence-information-macro::before,
+.panel[data-panel-type]::before {
+  content: var(--cf-panel-glyph);
+  position: absolute;
+  left: 11px;
+  top: 10px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--cf-panel-color);
+  color: #fff;
+  font: 700 10px/16px var(--cf-font);
+  text-align: center;
+}
+
+.confluence-information-macro-information,
+.panel[data-panel-type="info"] {
+  --cf-panel-color: #0065ff;
+  --cf-panel-bg: #e9f2ff;
+  --cf-panel-glyph: "i";
+}
+
+.confluence-information-macro-note,
+.panel[data-panel-type="note"] {
+  --cf-panel-color: #ff991f;
+  --cf-panel-bg: #fff7e6;
+  --cf-panel-glyph: "!";
+}
+
+.confluence-information-macro-warning,
+.confluence-information-macro-error,
+.panel[data-panel-type="warning"],
+.panel[data-panel-type="error"] {
+  --cf-panel-color: #de350b;
+  --cf-panel-bg: #ffebe6;
+  --cf-panel-glyph: "!";
+}
+
+.confluence-information-macro-tip,
+.confluence-information-macro-success,
+.panel[data-panel-type="tip"],
+.panel[data-panel-type="success"] {
+  --cf-panel-color: #00875a;
+  --cf-panel-bg: #e3fcef;
+  --cf-panel-glyph: "\2713";
+}
+
+.panel[data-panel-type="custom"] {
+  --cf-panel-color: #8993a4;
+  --cf-panel-bg: var(--cf-surface);
+  --cf-panel-glyph: "\2022";
+}
+
+.confluence-information-macro .title,
+.confluence-information-macro > p.title {
+  font-weight: 600;
+  margin: 0 0 0.3em;
+}
+
+.confluence-information-macro-body > :last-child,
+.confluence-information-macro > :last-child {
+  margin-bottom: 0;
+}
+
+.confluence-information-macro .panelContent,
+.panel[data-panel-type] .panelContent {
+  padding: 0;
+}
+
+/* ───────────────────────────── keep-together marks ───────────────────────────── */
+
+.cf-keep,
+pre.cf-keep,
+.cf-placeholder,
+.cf-img-missing,
+blockquote.cf-keep {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+/* ───────────────────────────── expand ───────────────────────────── */
+
+.cf-expand,
+.expand-container {
+  margin: 0.8em 0;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--cf-border-light);
+}
+
+.cf-expand-title {
+  font-weight: 600;
+  margin: 0 0 0.4em;
+  break-after: avoid;
+}
+
+.cf-expand-title::before {
+  content: "\25BE";
+  color: var(--cf-text-subtle);
+  display: inline-block;
+  width: 1.1em;
+}
+
+.expand-content,
+.cf-expand-body {
+  display: block !important;
+  opacity: 1 !important;
+  height: auto !important;
+  visibility: visible !important;
+}
+
+.expand-control {
+  display: none !important;
+}
+
+details > summary {
+  font-weight: 600;
+  list-style: none;
+}
+
+/* ───────────────────────────── status lozenges ───────────────────────────── */
+
+.aui-lozenge,
+.status-macro {
+  display: inline-block;
+  box-sizing: border-box;
+  max-width: 100%;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #dfe1e6;
+  color: #42526e;
+  font-size: 7.5pt;
+  font-weight: 700;
+  line-height: 1.5;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  vertical-align: 0.08em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.aui-lozenge-success,
+.aui-lozenge-green { background: #e3fcef; color: #006644; }
+.aui-lozenge-error,
+.aui-lozenge-removed,
+.aui-lozenge-red { background: #ffebe6; color: #bf2600; }
+.aui-lozenge-current,
+.aui-lozenge-inprogress,
+.aui-lozenge-yellow { background: #fff0b3; color: #172b4d; }
+.aui-lozenge-complete,
+.aui-lozenge-blue { background: #deebff; color: #0747a6; }
+.aui-lozenge-new,
+.aui-lozenge-purple { background: #eae6ff; color: #403294; }
+.aui-lozenge-moved { background: #fff0b3; color: #172b4d; }
+
+.aui-lozenge-subtle {
+  background: #fff;
+  border: 1px solid currentColor;
+}
+
+/* ───────────────────────────── tasks ───────────────────────────── */
+
+ul.inline-task-list,
+ul.cf-task-list {
+  list-style: none;
+  padding-left: 0.2em;
+}
+
+li.cf-task {
+  list-style: none;
+  padding-left: 1.5em;
+  text-indent: -1.5em;
+}
+
+li.cf-task > * {
+  text-indent: 0;
+}
+
+.cf-task-box {
+  display: inline-block;
+  width: 1.5em;
+  text-indent: 0;
+  font-size: 1.05em;
+  line-height: 1;
+  color: var(--cf-text-muted);
+  font-family: "Segoe UI Symbol", "Apple Symbols", "DejaVu Sans", var(--cf-font);
+}
+
+.cf-task-box-checked {
+  color: #00875a;
+}
+
+/* ───────────────────────────── layouts ───────────────────────────── */
+
+.contentLayout2,
+.contentLayout {
+  margin: 0;
+}
+
+.columnLayout {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6mm;
+  margin: 0 0 0.6em;
+  break-inside: auto;
+}
+
+.columnLayout > .cell {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.columnLayout.single > .cell,
+.columnLayout.fixed-width > .cell,
+.columnLayout.full-width > .cell {
+  flex: 1 1 100%;
+}
+
+.columnLayout.two-left-sidebar > .cell.aside,
+.columnLayout.two-right-sidebar > .cell.aside,
+.columnLayout.three-with-sidebars > .cell.aside {
+  flex: 0 0 28%;
+}
+
+.columnLayout > .cell > .innerCell > :first-child {
+  margin-top: 0;
+}
+
+.sectionColumnWrapper,
+.sectionMacro {
+  display: flex;
+  gap: 6mm;
+}
+
+.sectionMacro .columnMacro {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* ───────────────────────────── links, mentions, cards ───────────────────────────── */
+
+a.confluence-userlink,
+a.user-mention,
+.user-mention {
+  display: inline-block;
+  padding: 0 0.4em;
+  border-radius: 1em;
+  background: #ebecf0;
+  color: #253858;
+  font-size: 0.95em;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+a.current-user-mention,
+.current-user-mention {
+  background: #0052cc;
+  color: #fff;
+}
+
+a[data-card-appearance="block"],
+a[data-card-appearance="embed"] {
+  display: block;
+  margin: 0.6em 0;
+  padding: 8px 12px;
+  border: 1px solid var(--cf-border-light);
+  border-radius: 4px;
+  background: var(--cf-surface-2);
+  overflow-wrap: anywhere;
+  break-inside: avoid;
+}
+
+a.unresolved {
+  color: #de350b;
+}
+
+.cf-comment,
+.inline-comment-marker.cf-comment {
+  background: #fff0b3;
+  border-bottom: 2px solid #ffc400;
+}
+
+/* ───────────────────────────── TOC macro (inside pages) ───────────────────────────── */
+
+.toc-macro {
+  margin: 0.6em 0 1em;
+  padding: 8px 12px;
+  background: var(--cf-surface-2);
+  border: 1px solid var(--cf-border-light);
+  border-radius: 3px;
+  font-size: 9.5pt;
+  break-inside: avoid;
+}
+
+.toc-macro ul,
+.toc-macro ol {
+  margin: 0;
+  padding-left: 1.2em;
+}
+
+.toc-macro > ul,
+.toc-macro > ol {
+  padding-left: 0;
+  list-style: none;
+}
+
+.toc-macro li {
+  margin: 0.1em 0;
+}
+
+ul.toc-indentation {
+  list-style: none;
+}
+
+.toc-macro .toc-item-body .toc-outline {
+  color: var(--cf-text-muted);
+  margin-right: 0.3em;
+}
+
+/* ───────────────────────────── FR-9 placeholders ───────────────────────────── */
+
+.cf-placeholder {
+  display: block;
+  margin: 0.8em 0;
+  padding: 8px 12px 8px 12px;
+  border: 1px dashed #a5adba;
+  border-radius: 4px;
+  background: var(--cf-surface-2);
+  color: var(--cf-text-muted);
+  font-size: 9pt;
+  line-height: 1.45;
+}
+
+.cf-placeholder > span {
+  display: block;
+}
+
+.cf-placeholder-label {
+  color: var(--cf-text);
+  font-weight: 600;
+}
+
+.cf-placeholder-label::before {
+  content: "\25A3";
+  color: var(--cf-text-subtle);
+  margin-right: 0.45em;
+  font-weight: 400;
+}
+
+.cf-placeholder-url {
+  font-family: var(--cf-mono);
+  font-size: 8pt;
+  word-break: break-all;
+  margin-top: 2px;
+}
+
+.cf-placeholder-open {
+  margin-top: 2px;
+}
+
+.cf-placeholder.cf-placeholder-inline {
+  display: inline;
+  margin: 0;
+  padding: 0 0.35em;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+.cf-placeholder.cf-placeholder-inline > span {
+  display: inline;
+}
+
+.cf-placeholder.cf-placeholder-inline .cf-placeholder-url {
+  margin-left: 0.4em;
+}
+
+/* ───────────────────────────── cover ───────────────────────────── */
+
+.cf-cover {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: calc(var(--cf-content-height, 260mm) - 2mm);
+  overflow: hidden;
+  padding: 0 4mm;
+  break-after: page;
+  page-break-after: always;
+  break-inside: avoid;
+}
+
+.cf-cover-inner {
+  border-left: 5px solid var(--cf-accent);
+  padding: 4mm 0 4mm 9mm;
+}
+
+.cf-cover-site {
+  color: var(--cf-accent);
+  font-size: 10pt;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 6mm;
+}
+
+.cf-cover-title {
+  font-size: 30pt;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  color: var(--cf-text);
+  margin: 0 0 4mm;
+  overflow-wrap: anywhere;
+}
+
+.cf-cover-subtitle {
+  color: var(--cf-text-muted);
+  font-size: 12pt;
+  margin-bottom: 12mm;
+}
+
+.cf-cover-meta {
+  border-collapse: collapse;
+  font-size: 9.5pt;
+  margin: 0;
+  max-width: 100%;
+}
+
+.cf-cover-meta th,
+.cf-cover-meta td {
+  border: 0;
+  background: transparent;
+  padding: 1.5mm 6mm 1.5mm 0;
+  vertical-align: top;
+}
+
+.cf-cover-meta th {
+  color: var(--cf-text-subtle);
+  font-weight: 600;
+  font-size: 8pt;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  padding-top: 2mm;
+}
+
+.cf-cover-meta td {
+  color: var(--cf-text);
+  overflow-wrap: anywhere;
+}
+
+.cf-cover-generator {
+  margin-top: auto;
+  padding-top: 8mm;
+  color: var(--cf-text-subtle);
+  font-size: 8pt;
+  text-align: left;
+}
+
+.cf-cover > .cf-cover-inner {
+  margin-top: auto;
+}
+
+/* ───────────────────────────── table of contents ───────────────────────────── */
+
+.cf-toc {
+  break-before: page;
+  page-break-before: always;
+  break-after: page;
+  page-break-after: always;
+}
+
+.cf-doc > .cf-toc:first-child {
+  break-before: auto;
+  page-break-before: auto;
+}
+
+.cf-toc-title {
+  font-size: 20pt;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin: 0 0 6mm;
+  padding-bottom: 3mm;
+  border-bottom: 2px solid var(--cf-text);
+}
+
+.cf-toc ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cf-toc ol ol {
+  padding-left: 6mm;
+}
+
+.cf-toc li {
+  margin: 0;
+  break-inside: auto;
+}
+
+.cf-toc-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6em;
+  padding: 1.2mm 0;
+  border-bottom: 1px solid #f0f1f3;
+  break-inside: avoid;
+}
+
+.cf-toc-entry a {
+  color: var(--cf-text);
+  overflow-wrap: anywhere;
+}
+
+.cf-toc-l0 > .cf-toc-entry {
+  font-weight: 600;
+  font-size: 10.5pt;
+  padding-top: 2mm;
+}
+
+.cf-toc-l0 > .cf-toc-entry a {
+  color: var(--cf-text);
+}
+
+.cf-toc-l1 > .cf-toc-entry,
+.cf-toc-l2 > .cf-toc-entry,
+.cf-toc-l3 > .cf-toc-entry,
+.cf-toc-deep > .cf-toc-entry {
+  font-size: 9.5pt;
+}
+
+.cf-toc-l2 > .cf-toc-entry a,
+.cf-toc-l3 > .cf-toc-entry a,
+.cf-toc-deep > .cf-toc-entry a {
+  color: #344563;
+}
+
+.cf-toc-kind {
+  flex: none;
+  color: var(--cf-text-subtle);
+  font-size: 7pt;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border: 1px solid var(--cf-border-light);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+/* ───────────────────────────── page sections ───────────────────────────── */
+
+.cf-page {
+  break-before: page;
+  page-break-before: always;
+}
+
+.cf-doc > .cf-page:first-child {
+  break-before: auto;
+  page-break-before: auto;
+}
+
+.cf-page-meta {
+  margin: 0 0 7mm;
+  padding: 0 0 3mm;
+  border-bottom: 1px solid var(--cf-border-light);
+  break-inside: avoid;
+  break-after: avoid;
+}
+
+/* Hidden-in-plain-sight merge marker: must remain real (extractable) text. */
+.cf-marker {
+  display: block;
+  height: 1px;
+  overflow: visible;
+  color: #fff;
+  font-size: 1px;
+  line-height: 1px;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.cf-page-title {
+  font-size: 22pt;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
+  margin: 0 0 2.5mm;
+  overflow-wrap: anywhere;
+}
+
+.cf-page-info {
+  color: var(--cf-text-muted);
+  font-size: 8.5pt;
+  line-height: 1.5;
+}
+
+.cf-page-info > span + span::before {
+  content: "\00B7";
+  margin: 0 0.5em;
+  color: var(--cf-text-subtle);
+}
+
+.cf-breadcrumb {
+  color: var(--cf-text-muted);
+}
+
+.cf-page-info a {
+  color: var(--cf-link);
+}
+
+.cf-content {
+  display: block;
+}
+
+.cf-content::after {
+  content: "";
+  display: block;
+  clear: both;
+}
+
+/* Folder section dividers and link-only entries. */
+.cf-page.cf-section .cf-page-meta {
+  border-bottom: 3px solid var(--cf-accent);
+}
+
+.cf-linkonly,
+.cf-live-note,
+.cf-unavailable {
+  color: var(--cf-text-muted);
+  font-size: 9.5pt;
+  padding: 8px 12px;
+  border: 1px solid var(--cf-border-light);
+  border-radius: 4px;
+  background: var(--cf-surface-2);
+  break-inside: avoid;
+}
+
+.cf-linkonly a,
+.cf-live-note a,
+.cf-unavailable a {
+  word-break: break-all;
+}
+
+.cf-live-slot {
+  display: block;
+}
+
+.cf-unavailable {
+  border-color: #ffbdad;
+  background: #fff4f2;
+}
+
+/* Small anchor holders left by replaced macros. */
+.cf-anchor {
+  display: inline;
+}
+
+/* Elements Confluence hides in its own print styles. */
+.hidden-print,
+.noprint,
+.no-print {
+  display: none !important;
+}
+
+.cf-folder-contents p {
+  margin: 0 0 0.3em;
+}
+
+.cf-folder-contents ul {
+  margin: 0;
+}

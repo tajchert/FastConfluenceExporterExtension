@@ -12,6 +12,7 @@ export default defineConfig({
     description: '__MSG_extDescription__',
     default_locale: 'en',
     minimum_chrome_version: '120',
+    icons: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png', 128: 'icons/128.png' },
     permissions: [
       'activeTab',
       'scripting',
@@ -24,10 +25,13 @@ export default defineConfig({
     ],
     // Generic: no Confluence site is hard-coded. Access to a site is requested at runtime,
     // per origin, the first time the user exports from it (or added on the options page).
-    host_permissions: mode === 'e2e' ? ['http://localhost/*', 'http://127.0.0.1/*'] : [],
+    // The e2e build (`wxt build --mode e2e` → .output/chrome-mv3-e2e) pre-grants the local mock
+    // Confluence so tests need not click the permission prompt. Production omits the key entirely.
+    ...(mode === 'e2e' ? { host_permissions: ['http://localhost/*', 'http://127.0.0.1/*'] } : {}),
     optional_host_permissions: ['https://*/*', 'http://*/*'],
     action: {
       default_title: '__MSG_actionTitle__',
+      default_icon: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png', 128: 'icons/128.png' },
     },
     commands: {
       'export-current-page': {

@@ -1,1 +1,59 @@
-{"type":"object","properties":{}}
+{
+  "type": "object",
+  "properties": {
+    "blockedSpaceKeys": {
+      "title": "Blocked spaces",
+      "description": "Confluence space keys that must never be exported (case-insensitive), e.g. HR or LEGAL. Pages from these spaces are left out of every export.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "disableLiveRender": {
+      "title": "Disable live render",
+      "description": "When true, the diagram fidelity mode (printing pages from the real Confluence UI) is turned off and cannot be enabled by users.",
+      "type": "boolean"
+    },
+    "maxPages": {
+      "title": "Maximum pages per export",
+      "description": "Exports with more pages than this are rejected.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "defaultOptions": {
+      "title": "Enforced default export options",
+      "description": "Default PDF options that override the user's saved defaults. Users can still change options for an individual export.",
+      "type": "object",
+      "properties": {
+        "paperSize": {
+          "title": "Paper size",
+          "type": "string",
+          "enum": ["A4", "Letter", "Legal", "A3"]
+        },
+        "orientation": {
+          "title": "Orientation",
+          "type": "string",
+          "enum": ["portrait", "landscape"]
+        },
+        "marginsMm": {
+          "title": "Page margins (mm)",
+          "type": "object",
+          "properties": {
+            "top": { "type": "number" },
+            "right": { "type": "number" },
+            "bottom": { "type": "number" },
+            "left": { "type": "number" }
+          }
+        },
+        "includeCover": { "title": "Include cover page", "type": "boolean" },
+        "includeToc": { "title": "Include table of contents", "type": "boolean" },
+        "includePageMeta": { "title": "Include page header (breadcrumb, last updated, link)", "type": "boolean" },
+        "includeComments": { "title": "Include comments", "type": "boolean" },
+        "pageNumbers": { "title": "Page numbers in the footer", "type": "boolean" },
+        "liveRender": { "title": "Live render diagrams by default", "type": "boolean" },
+        "separateFiles": { "title": "One PDF per page (ZIP)", "type": "boolean" },
+        "includeArchived": { "title": "Include archived pages", "type": "boolean" },
+        "shrinkWideTables": { "title": "Shrink wide tables to fit", "type": "boolean" },
+        "customCss": { "title": "Custom print CSS (branding)", "type": "string" }
+      }
+    }
+  }
+}

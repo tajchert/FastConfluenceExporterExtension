@@ -9,7 +9,7 @@
     "dev": "wxt",
     "dev:edge": "wxt -b edge",
     "build": "wxt build",
-    "build:e2e": "wxt build --mode e2e --outDir .output-e2e",
+    "build:e2e": "wxt build --mode e2e",
     "zip": "wxt zip",
     "zip:edge": "wxt zip -b edge",
     "compile": "tsc --noEmit",
