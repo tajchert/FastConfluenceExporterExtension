@@ -14,7 +14,15 @@ export interface MockConfluence {
   contextPath: string;
   url(path: string): string;
   log: MockRequest[];
-  config: { delayMs: number; imageDelayMs: number };
+  config: {
+    delayMs: number;
+    imageDelayMs: number;
+    /** Public site: anonymous access without the session cookie. */
+    publicAccess: boolean;
+    /** Destroy the connection of the next `dropCount` requests whose path contains `dropPath`. */
+    dropPath: string;
+    dropCount: number;
+  };
   reset(): void;
   close(): Promise<void>;
 }

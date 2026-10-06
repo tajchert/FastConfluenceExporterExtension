@@ -26,8 +26,11 @@ export default defineConfig({
     // Generic: no Confluence site is hard-coded. Access to a site is requested at runtime,
     // per origin, the first time the user exports from it (or added on the options page).
     // The e2e build (`wxt build --mode e2e` → .output/chrome-mv3-e2e) pre-grants the local mock
-    // Confluence so tests need not click the permission prompt. Production omits the key entirely.
+    // Confluence, and the live build (`--mode live` → .output/chrome-mv3-live) the two public
+    // Confluence sites of the opt-in live suite (tests/live), so tests need not click the
+    // permission prompt. Production omits the key entirely.
     ...(mode === 'e2e' ? { host_permissions: ['http://localhost/*', 'http://127.0.0.1/*'] } : {}),
+    ...(mode === 'live' ? { host_permissions: ['https://uconn.atlassian.net/*', 'https://cwiki.apache.org/*'] } : {}),
     optional_host_permissions: ['https://*/*', 'http://*/*'],
     action: {
       default_title: '__MSG_actionTitle__',

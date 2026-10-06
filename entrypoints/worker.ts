@@ -12,9 +12,10 @@ import { buildPrintDocument } from '../lib/assemble/document';
 import { detectLiveRenderMacros } from '../lib/assemble/macros';
 import { createClient, type ConfluenceClient, type ContentSummary, type PageBody } from '../lib/confluence/client';
 import { collect } from '../lib/confluence/collect';
-import { HttpError, getJson } from '../lib/confluence/http';
+import { HttpError } from '../lib/confluence/http';
+import { needsSessionCheck, readSession, sessionStillValid, type SessionState } from '../lib/confluence/session';
 import { decodeTinyCode, isSameSite, parseConfluenceUrl } from '../lib/confluence/url';
-import { LOGIN_REQUIRED_MESSAGE, SESSION_EXPIRED_MESSAGE } from '../lib/errors';
+import { LOGIN_REQUIRED_MESSAGE, NOT_PUBLIC_MESSAGE, SESSION_EXPIRED_MESSAGE } from '../lib/errors';
 import type { ResolvedContent, SwToWorker, SwToWorkerResponses, WorkerOp, WorkerToSw } from '../lib/messages';
 import { respond } from '../lib/rpc';
 import type { ContentType, FetchedPageInfo, PageRef, SiteInfo, TreeNode } from '../lib/types';
@@ -23,8 +24,8 @@ import { mapPool } from '../lib/util/pool';
 
 const INSTALLED_FLAG = '__cfpWorkerInstalled';
 const PRODUCT_NAME = 'Fast PDF Export for Confluence';
-const CONTENT_TYPES = new Set<ContentType>(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed']);
-const LINK_ONLY_TYPES = new Set<ContentType>(['folder', 'whiteboard', 'database', 'embed']);
+const CONTENT_TYPES = new Set<ContentType>(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed', 'slides']);
+const LINK_ONLY_TYPES = new Set<ContentType>(['folder', 'whiteboard', 'database', 'embed', 'slides']);
 
 /** Page bodies read while collecting (linked mode) are reused by the export's fetch. */
 const BODY_CACHE_MAX_ENTRIES = 300;
@@ -38,6 +39,8 @@ interface JobState {
   refs: Map<string, PageRef>;
   bodies: Map<string, PageBody>;
   infos: Map<string, FetchedPageInfo>;
+  /** Session at the start of the job's fetch (undefined when it could not be read). */
+  session?: Promise<SessionState | undefined>;
 }
 
 class LoginRequiredError extends Error {
@@ -163,30 +166,15 @@ export default defineUnlistedScript(() => {
   const statusOf = (e: unknown): number | undefined =>
     e instanceof HttpError ? e.status : typeof (e as { status?: unknown })?.status === 'number' ? (e as { status: number }).status : undefined;
 
-  const describeFetchError = (e: unknown): { error: string; httpStatus?: number } => {
+  const describeFetchError = (e: unknown, anonymous: boolean): { error: string; httpStatus?: number } => {
     const status = statusOf(e);
+    // Not signed in on a public site: the page is simply not public.
+    if (anonymous && (status === 401 || status === 403 || status === 404)) return { error: NOT_PUBLIC_MESSAGE, httpStatus: status };
     if (status === 401) return { error: SESSION_EXPIRED_MESSAGE, httpStatus: status };
     if (status === 403) return { error: 'You do not have permission to view this page.', httpStatus: status };
     if (status === 404) return { error: 'Page not found (it may have been deleted or you lack access).', httpStatus: status };
     const message = e instanceof Error ? e.message : String(e);
     return status ? { error: message, httpStatus: status } : { error: message };
-  };
-
-  /**
-   * Is the Confluence session still valid? Asked once when a page answers 401 or the network
-   * fails (an expired SSO session often shows up as a failed cross-origin redirect).
-   */
-  const sessionIsValid = async (site: SiteInfo, signal: AbortSignal): Promise<boolean> => {
-    try {
-      const u = await getJson<{ type?: string }>(`${site.baseUrl.replace(/\/+$/, '')}/rest/api/user/current`, {
-        signal,
-        maxRetries: 1,
-      });
-      return !!u && u.type !== 'anonymous';
-    } catch (e) {
-      if (isAbortError(e)) throw e;
-      return false;
-    }
   };
 
   const toTreeNode = (s: ContentSummary): TreeNode => ({
@@ -205,7 +193,10 @@ export default defineUnlistedScript(() => {
     const total = msg.pages.length;
     let done = 0;
     const detect = msg.liveRenderMacros.length > 0;
-    /** One session check per fetch, shared by every page that fails with 401 / a network error. */
+    // Who we are at the start (signed in, or anonymous on a public site): a later failure only
+    // means "signed out" when that changed. Read in parallel with the first page bodies.
+    job.session ??= readSession(job.site.baseUrl, signal).catch(() => undefined);
+    /** One session check per fetch, shared by every page whose failure calls for one. */
     let sessionCheck: Promise<boolean> | null = null;
     let loginError: LoginRequiredError | null = null;
 
@@ -257,16 +248,17 @@ export default defineUnlistedScript(() => {
         } catch (e) {
           if (isAbortError(e) || signal.aborted) throw loginError ?? e;
           const status = statusOf(e);
-          if (status === 401 || status === 0) {
-            sessionCheck ??= sessionIsValid(job.site, signal);
+          const start = await job.session;
+          if (needsSessionCheck(status, start)) {
+            sessionCheck ??= readSession(job.site.baseUrl, signal).then((now) => sessionStillValid(start, now));
             if (!(await sessionCheck)) {
               // Every remaining page would fail the same way: stop and ask the user to sign in.
-              loginError ??= new LoginRequiredError(status === 401 ? SESSION_EXPIRED_MESSAGE : LOGIN_REQUIRED_MESSAGE);
+              loginError ??= new LoginRequiredError(status === 0 ? LOGIN_REQUIRED_MESSAGE : SESSION_EXPIRED_MESSAGE);
               job.controller.abort();
               throw loginError;
             }
           }
-          info = { id: ref.id, ok: false, needsLiveRender: false, ...describeFetchError(e) };
+          info = { id: ref.id, ok: false, needsLiveRender: false, ...describeFetchError(e, start === 'anonymous') };
         }
         job.infos.set(ref.id, info);
         done++;
@@ -386,6 +378,9 @@ export default defineUnlistedScript(() => {
         const site = sameOriginSite(msg.request.site);
         const job = getJob(msg.jobId, site);
         const jobId = msg.jobId;
+        // Session baseline as early as possible: a session that expires while the user looks at
+        // the preview must still read as "signed in → signed out", not as an anonymous visitor.
+        job.session ??= readSession(job.site.baseUrl, job.controller.signal).catch(() => undefined);
         return runInBackground(
           jobId,
           'collect',

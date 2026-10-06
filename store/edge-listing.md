@@ -40,7 +40,7 @@ npm run zip:edge        # → .output/*-edge.zip
 | Store logo | `store/edge-logo-300x300.png` (1:1, 300×300, transparent background) |
 | Small promotional tile | `store/promo-small-440x280.png` |
 | Large promotional tile | `store/marquee-1400x560.png` |
-| Screenshots | The same 1280×800 screenshots as Chrome, taken in Edge if possible |
+| Screenshots | The same 1280×800 screenshots as Chrome: `store/screenshots/*.png` (`npm run screenshots`) |
 | Search terms | `Confluence`, `PDF`, `export`, `documentation`, `wiki`, `print` (Edge allows up to 7 terms, 30 characters each and 21 words in total) |
 
 ## Notes for certification

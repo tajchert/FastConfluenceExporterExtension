@@ -1232,14 +1232,10 @@ ul.toc-indentation {
   color: var(--cf-link);
 }
 
+/* Contains floated images. A `::after { clear: both }` block here could push an empty line
+   onto a new sheet when the content ends near the bottom (a trailing blank page). */
 .cf-content {
-  display: block;
-}
-
-.cf-content::after {
-  content: "";
-  display: block;
-  clear: both;
+  display: flow-root;
 }
 
 /* Folder section dividers and link-only entries. */
@@ -1293,3 +1289,20 @@ ul.toc-indentation {
 .cf-folder-contents ul {
   margin: 0;
 }
+
+/* Text colours from the legacy editor palette (Cloud export_view prints them as classes, e.g.
+   `legacy-color-text-red2`). Approximate tones per colour family, so coloured text keeps its
+   meaning on paper; `default` follows the body text. */
+.legacy-color-text-default { color: inherit; }
+[class*="legacy-color-text-red"] { color: #de350b; }
+[class*="legacy-color-text-orange"] { color: #c25100; }
+[class*="legacy-color-text-yellow"] { color: #b38600; }
+[class*="legacy-color-text-green"] { color: #00875a; }
+[class*="legacy-color-text-teal"] { color: #00838f; }
+[class*="legacy-color-text-blue"] { color: #0052cc; }
+[class*="legacy-color-text-purple"] { color: #5243aa; }
+[class*="legacy-color-text-magenta"] { color: #b3008a; }
+[class*="legacy-color-text-pink"] { color: #c9006b; }
+[class*="legacy-color-text-brown"] { color: #8b4513; }
+[class*="legacy-color-text-grey"],
+[class*="legacy-color-text-gray"] { color: #5e6c84; }

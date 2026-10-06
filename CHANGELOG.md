@@ -6,6 +6,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Public Confluence sites can be exported without signing in: a network hiccup no longer stops
+  the export with "please log in", and pages that aren't public are reported as such. On Data
+  Center, a session that expires mid-export is reported once instead of as many "not found" pages.
+- Data Center: links written as `/display/SPACE/Title` jump within the PDF; Gliffy and draw.io
+  images are no longer sent to live render; the page tree macro gets a placeholder; hidden
+  attachment details, empty settings boxes and "Getting issue details…" placeholders no longer
+  print; Jira table headers repeat on every sheet; no trailing blank sheet after a page.
+- Cloud: tiny links that land on `tinyurl.action` are recognized; non-page items at a space root
+  (folders, whiteboards, …) and slides appear in the tree; empty Jira work-item tables become a
+  placeholder; coloured text keeps its colour; links to another page's heading and to a space
+  overview resolve inside the PDF; the "recently updated" spinner and "Show More" are dropped.
+- Cloud uses REST API v2 for the helper tab and the popup's page lookup.
+
 ### Changed
 
 - PDF bookmarks follow the page tree, with each page's headings below it; the TOC and the

@@ -94,7 +94,7 @@ describe('helper tab bookkeeping', () => {
     await new Promise((r) => setTimeout(r, 10));
     ac.abort();
     await expect(p).rejects.toMatchObject({ name: 'AbortError' });
-    expect(created).toEqual(['https://x/wiki/rest/api/space?limit=1#cfp-worker']);
+    expect(created).toEqual(['https://x/wiki/api/v2/spaces?limit=1#cfp-worker']);
     expect(removed).toEqual([77]);
   });
 });

@@ -8,6 +8,7 @@ import { createPool } from '../util/pool';
 import {
   buildTreeOrder,
   compareSiblings,
+  cqlString,
   qs,
   toContentType,
   toPosition,
@@ -20,7 +21,7 @@ import {
   type SpaceSummary,
   type TitleLookup,
 } from './client';
-import { collectAll, getJson, HttpError, type HttpOptions } from './http';
+import { collectAll, getJson, HttpError, paginate, type HttpOptions } from './http';
 import {
   assertHasBody,
   branchWarning,
@@ -78,6 +79,7 @@ const COLLECTION: Record<ContentType, string> = {
   whiteboard: 'whiteboards',
   database: 'databases',
   embed: 'embeds',
+  slides: 'slides',
 };
 
 /**
@@ -90,6 +92,10 @@ const DISCOVERY_ORDER: ContentType[] = ['folder', 'whiteboard', 'database', 'emb
 const MAX_V2_DEPTH = 5;
 const TREE_CONCURRENCY = 4;
 const MAX_BREADCRUMB = 50;
+/** Non-page content considered when looking for space roots (CQL hits, any depth). */
+const MAX_NON_PAGE_ROOT_SCAN = 500;
+/** Non-page items at a space root that are listed. */
+const MAX_NON_PAGE_ROOTS = 50;
 
 /** The endpoint (or the content under that type) does not exist → try a fallback. */
 function isMissing(e: unknown): boolean {
@@ -122,6 +128,11 @@ export class CloudClient implements ConfluenceClient {
   private readonly spaceKeys = new Map<string, Promise<string | undefined>>();
   private readonly spaces = new Map<string, Promise<SpaceSummary>>();
   private readonly users = new Map<string, Promise<string | undefined>>();
+  /**
+   * Profiles are not readable (403, e.g. an anonymous visitor of a public site): no further
+   * per-author lookups for this client.
+   */
+  private profilesHidden = false;
 
   constructor(site: SiteInfo, http: HttpOptions = {}) {
     this.site = site;
@@ -185,13 +196,17 @@ export class CloudClient implements ConfluenceClient {
     );
   }
 
-  /** Display name of an account (same caching rule as spaceKeyOf). */
+  /**
+   * Display name of an account (same caching rule as spaceKeyOf). A 403 ("not permitted to view
+   * user profiles", e.g. anonymous access) stops all further lookups: the name stays unknown.
+   */
   private userDisplayName(accountId: string | undefined): Promise<string | undefined> {
-    if (!accountId) return Promise.resolve(undefined);
+    if (!accountId || this.profilesHidden) return Promise.resolve(undefined);
     return this.cached(this.users, accountId, () =>
       this.getV1<V1User>(`/user${qs({ accountId })}`).then(
         (u) => userName(u),
         (e: unknown) => {
+          if (e instanceof HttpError && e.status === 403) this.profilesHidden = true;
           if (isDefinitive(e)) return undefined;
           throw e;
         },
@@ -425,7 +440,11 @@ export class CloudClient implements ConfluenceClient {
           `/spaces/${encodeURIComponent(spaceId)}/pages${qs({ depth: 'root', limit: 250 })}`,
         );
         const roots = await Promise.all(items.map((raw) => this.fromV2(raw, 'page', { spaceKey: space.key })));
-        return sortRoots(roots, homepageId);
+        // `pages?depth=root` lists pages only, and there is no space-level `direct-children`:
+        // folders, whiteboards, databases, embeds and slides at the space root come from CQL.
+        const others = await this.nonPageRoots(space.key, spaceId);
+        const known = new Set(roots.map((r) => r.id));
+        return sortRoots([...roots, ...others.filter((o) => !known.has(o.id))], homepageId);
       } catch (e) {
         if (!isMissing(e)) throw e;
       }
@@ -440,6 +459,41 @@ export class CloudClient implements ConfluenceClient {
     return sortRoots(
       items.map((raw) => v1Summary(raw, this.site, { spaceKey: space.key, spaceId })),
       homepageId,
+    );
+  }
+
+  /**
+   * Non-page content at the root of a space (no ancestors), via CQL with `content.ancestors`
+   * (verified on a live Cloud site). Best effort: a failing search adds nothing.
+   */
+  private async nonPageRoots(spaceKey: string, spaceId: string): Promise<ContentSummary[]> {
+    const cql = `space = ${cqlString(spaceKey)} and type in (folder, whiteboard, database, embed)`;
+    const found: ContentSummary[] = [];
+    try {
+      let scanned = 0;
+      for await (const h of paginate<{ content?: V1Content & { ancestors?: unknown[] } }>(
+        `${this.v1}/search${qs({ cql, expand: 'content.ancestors', limit: 100 })}`,
+        this.site,
+        this.http,
+      )) {
+        if (++scanned > MAX_NON_PAGE_ROOT_SCAN) break;
+        const c = h.content;
+        // Only items whose ancestors were expanded and are empty sit at the space root.
+        if (!c || !Array.isArray(c.ancestors) || c.ancestors.length > 0) continue;
+        const type = toContentType(c.type);
+        if (!type || type === 'page' || type === 'blogpost') continue;
+        found.push({ ...v1Summary(c, this.site, { type, spaceKey, spaceId }), type, spaceKey, spaceId });
+      }
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      return [];
+    }
+    // The sidebar position comes from v2 (one cached lookup per root item; usually a handful).
+    return Promise.all(
+      found.slice(0, MAX_NON_PAGE_ROOTS).map(async (c) => {
+        const full = await optional(this.getContent(c.id, c.type));
+        return full ? { ...full, spaceKey, spaceId } : c;
+      }),
     );
   }
 

@@ -40,6 +40,37 @@ export function readOutline(doc: PDFDocument): Outline[] {
   return root ? walk(root.get(PDFName.of('First')), new Set()) : [];
 }
 
+export type PageTree = [string, PageTree[]];
+
+/** The page bookmarks of an outline (heading bookmarks of each page left out), nested. */
+export function pageTree(items: Outline[], titles: Iterable<string>): PageTree[] {
+  const set = new Set(titles);
+  const walk = (list: Outline[]): PageTree[] =>
+    list.flatMap((it): PageTree[] => (set.has(it.title) ? [[it.title, walk(it.children)]] : walk(it.children)));
+  return walk(items);
+}
+
+/**
+ * Does the PDF outline contain the page tree, in order? Each page's own heading bookmarks sit
+ * next to its child pages and may share a title with a page, so pages are matched as an ordered
+ * subsequence (recursively) instead of filtering bookmarks by title.
+ */
+export function outlineHasTree(outline: Outline[], expected: PageTree[]): boolean {
+  let from = 0;
+  for (const [title, kids] of expected) {
+    let found = -1;
+    for (let i = from; i < outline.length; i++) {
+      if (outline[i]!.title === title && outlineHasTree(outline[i]!.children, kids)) {
+        found = i;
+        break;
+      }
+    }
+    if (found < 0) return false;
+    from = found + 1;
+  }
+  return true;
+}
+
 /** Named destinations (catalog /Dests dictionary and the /Names → /Dests name tree). */
 export function namedDestinations(doc: PDFDocument): string[] {
   const names = new Set<string>();

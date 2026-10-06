@@ -248,7 +248,7 @@ export async function collect(
 
 // ───────────────────────────── linked pages (FR-5) ─────────────────────────────
 
-const EMPTY_TARGETS: LinkTargets = { ids: [], types: {}, titles: [], tinyCodes: [] };
+const EMPTY_TARGETS: LinkTargets = { ids: [], types: {}, titles: [], tinyCodes: [], spaceKeys: [] };
 
 async function collectLinked(
   client: ConfluenceClient,
@@ -335,10 +335,29 @@ async function collectLinked(
       },
       signal,
     );
+    const bySpace = await mapPool(
+      t.spaceKeys.slice(0, reserve(t.spaceKeys.length)),
+      CONCURRENCY,
+      async (key) => {
+        try {
+          const home = (await client.getSpace(key)).homepageId;
+          if (!home) {
+            out.warnings.push(`Linked space ${key} (from “${src.title}”) has no homepage.`);
+            return null;
+          }
+          return visited.has(home) ? null : await client.getContent(home, 'page');
+        } catch (e) {
+          if (isAbortError(e)) throw e;
+          out.warnings.push(`Linked space ${key} (from “${src.title}”) could not be resolved: ${errorMessage(e)}`);
+          return null;
+        }
+      },
+      signal,
+    );
     for (const code of t.tinyCodes) {
       out.warnings.push(`Short link /x/${code} (from “${src.title}”) could not be resolved.`);
     }
-    return [...byId, ...byTitle].filter((c): c is ContentSummary => !!c);
+    return [...byId, ...byTitle, ...bySpace].filter((c): c is ContentSummary => !!c);
   };
 
   const added: ContentSummary[] = [];

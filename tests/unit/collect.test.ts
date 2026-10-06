@@ -294,6 +294,15 @@ describe('collect', () => {
       expect(c.calls.filter((x) => x.startsWith('body:'))).toEqual(['body:1000']);
     });
 
+    it('a link to a space follows its homepage', async () => {
+      const c = new FakeClient([
+        { id: '1', title: 'Root', html: '<a href="https://acme.atlassian.net/wiki/spaces/OPS/overview">ops</a>' },
+        { id: 'home', title: 'Ops home', space: 'OPS' },
+      ]);
+      const r = await collect(c, req({ mode: 'linked', root: { id: '1', type: 'page' }, linkDepth: 1 }));
+      expect(r.pages.map((p) => `${p.id}:${p.reason}`)).toEqual(['1:root', 'home:linked']);
+    });
+
     it('linked pages carry breadcrumbs', async () => {
       const c = numeric(linkedClient());
       c.nodes.get('1001')!.parentId = '1004';

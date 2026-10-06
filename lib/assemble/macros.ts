@@ -172,6 +172,41 @@ function isEmptyShell(el: Element): boolean {
   return textOf(clone) === '' && !clone.querySelector(SHELL_MEDIA);
 }
 
+/** Elements that never carry a rendering themselves (image maps, hidden settings). */
+const CLASS_SCAN_NOISE = new Set(['MAP', 'AREA', 'FIELDSET', 'INPUT', 'SCRIPT', 'STYLE', 'TEMPLATE', 'NOSCRIPT']);
+
+function classMatch(el: Element, terms: string[]): string | null {
+  if (CLASS_SCAN_NOISE.has(el.tagName)) return null;
+  for (const token of (el.getAttribute('class') || '').split(/\s+/)) {
+    const t = token ? matchTerm(token, terms) : null;
+    if (t) return t;
+  }
+  return null;
+}
+
+/**
+ * Outermost elements whose class names a configured macro (e.g. DC's `span.gliffy-container`
+ * around `img.gliffy-image` + `map.gliffy-dynamic`, or `img.drawio-diagram-image`), outside any
+ * `[data-macro-name]` container. Only the outermost match counts: the container holds the image.
+ */
+function classMatches(body: Element, terms: string[]): { el: Element; term: string }[] {
+  const out: { el: Element; term: string }[] = [];
+  for (const el of Array.from(body.querySelectorAll('[class]'))) {
+    if (el.closest('[data-macro-name]')) continue;
+    const term = classMatch(el, terms);
+    if (!term) continue;
+    let covered = false;
+    for (let p = el.parentElement; p && p !== body; p = p.parentElement) {
+      if (classMatch(p, [term])) {
+        covered = true;
+        break;
+      }
+    }
+    if (!covered) out.push({ el, term });
+  }
+  return out;
+}
+
 function macroNameOf(el: Element): string {
   return (el.getAttribute('data-macro-name') || '').trim().toLowerCase();
 }
@@ -233,8 +268,12 @@ export function detectLiveRenderMacros(
   }
 
   const body = doc.body;
+  const byClass = classMatches(body, terms);
   for (const name of storageHits) {
-    const rendered = Array.from(body.querySelectorAll('[data-macro-name]')).filter((el) => macroNameOf(el) === name);
+    let rendered = Array.from(body.querySelectorAll('[data-macro-name]')).filter((el) => macroNameOf(el) === name);
+    // Cloud and DC export_view often has no `data-macro-name` at all: fall back to the class
+    // names of the rendered output (DC draw.io prints `img.drawio-diagram-image`).
+    if (rendered.length === 0) rendered = byClass.filter((m) => matchTerm(name, [m.term])).map((m) => m.el);
     if (rendered.length > 0 && rendered.every(hasStaticRendering)) continue;
     add(name);
   }
@@ -249,16 +288,8 @@ export function detectLiveRenderMacros(
     }
   }
 
-  for (const el of Array.from(body.querySelectorAll('[class]'))) {
-    if (el.closest('[data-macro-name]')) continue;
-    const cls = el.getAttribute('class') || '';
-    for (const token of cls.split(/\s+/)) {
-      const t = token ? matchTerm(token, terms) : null;
-      if (t && !hasStaticRendering(el)) {
-        add(t);
-        break;
-      }
-    }
+  for (const { el, term } of byClass) {
+    if (!hasStaticRendering(el)) add(term);
   }
 
   for (const el of Array.from(body.querySelectorAll('.conf-macro.output-block:not([data-macro-name])'))) {
@@ -434,10 +465,23 @@ export function replaceUnsupportedContent(root: Element, ctx: { pageUrl: string 
     });
   }
 
-  // 4. Empty macro / Connect / Forge app placeholders.
-  for (const el of Array.from(root.querySelectorAll('[data-macro-name], .conf-macro.output-block'))) {
+  // 4. Jira work items (Cloud datasource table) whose rows are loaded in the browser: an empty
+  //    table body would print as a bare header row.
+  for (const table of Array.from(root.querySelectorAll('table.jiraWorkItemMacroListViewTable'))) {
+    if (table.querySelector('tbody tr, tbody td')) continue;
+    replace(table, {
+      kind: 'jira',
+      label: 'Jira work items',
+      text: 'The Jira work items are loaded by Confluence in the browser (or are not visible to you) and are not included in the PDF.',
+      inline: false,
+    });
+  }
+
+  // 5. Empty macro / Connect / Forge app placeholders. DC's page tree has no macro name in
+  //    export_view, only its `plugin_pagetree` container.
+  for (const el of Array.from(root.querySelectorAll('[data-macro-name], .conf-macro.output-block, .plugin_pagetree'))) {
     if (!root.contains(el)) continue;
-    const name = macroNameOf(el);
+    const name = macroNameOf(el) || (el.classList.contains('plugin_pagetree') ? 'pagetree' : '');
     if (JS_SHELL_MACROS.has(name)) {
       if (isEmptyShell(el)) {
         replace(el, {

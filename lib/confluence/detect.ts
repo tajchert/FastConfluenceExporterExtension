@@ -66,6 +66,10 @@ export async function probePage(): Promise<ProbeResult> {
     const last = raw[raw.length - 1];
     if (last && last.toLowerCase().endsWith('.action')) {
       const action = last.toLowerCase();
+      if (action === 'tinyurl.action') {
+        const code = (q.get('urlIdentifier') ?? '').trim();
+        return code ? { kind: 'tiny', tinyCode: code, id: decodeTiny(code) } : { kind: 'unknown' };
+      }
       const pid = q.get('pageId') ?? q.get('contentId') ?? (action === 'resumedraft.action' ? q.get('draftId') : null);
       if (pid && NUM.test(pid)) return { kind: 'page', id: pid };
       const key = q.get('spaceKey') ?? q.get('key') ?? undefined;
@@ -250,6 +254,8 @@ export async function probePage(): Promise<ProbeResult> {
     const userP = (async (): Promise<string | undefined> => {
       const m = meta('ajs-current-user-fullname');
       if (m) return m;
+      // Anonymous visitor (public site): the user metas are present but empty — no request.
+      if (metaRaw('ajs-remote-user') === '' && metaRaw('ajs-atlassian-account-id') === '') return undefined;
       const u = await tryJson('/rest/api/user/current');
       if (!u || u.type === 'anonymous') return undefined;
       return u.displayName || u.publicName || u.username || undefined;
@@ -296,14 +302,32 @@ export async function probePage(): Promise<ProbeResult> {
         }
       }
     } else if (id && !title) {
+      /** v2 timestamps: ISO strings, but folders report `createdAt` in epoch milliseconds. */
+      const iso = (v: unknown): string | undefined => {
+        if (typeof v === 'number' && Number.isFinite(v)) return new Date(v).toISOString();
+        if (typeof v === 'string' && /^\d{12,}$/.test(v)) return new Date(Number(v)).toISOString();
+        return typeof v === 'string' && v ? v : undefined;
+      };
+      const fromV2 = (v: any) => {
+        title = v.title;
+        lastUpdated = iso(v.version?.createdAt) ?? iso(v.createdAt);
+        if (v.spaceId !== undefined && v.spaceId !== null) spaceId = String(v.spaceId);
+      };
+      const v2Path = (k: ContentKind) => `/api/v2/${k === 'page' ? 'pages' : k + 's'}/${id}`;
+      let done = false;
       if (kind === 'folder' || kind === 'whiteboard' || kind === 'database' || kind === 'embed') {
-        const c = await tryJson(`/api/v2/${kind}s/${id}`);
+        const c = await tryJson(v2Path(kind));
+        if (c) fromV2(c);
+        done = true;
+      } else if (flavour === 'cloud' && (kind === 'page' || kind === 'blogpost')) {
+        // Cloud: REST v2 first (v1 is deprecated there); the URL already told us the type.
+        const c = await tryJson(v2Path(kind));
         if (c) {
-          title = c.title;
-          lastUpdated = c.version?.createdAt ?? c.createdAt;
-          if (c.spaceId !== undefined && c.spaceId !== null) spaceId = String(c.spaceId);
+          fromV2(c);
+          done = true;
         }
-      } else {
+      }
+      if (!done) {
         // One v1 call gives type, title, space key and last update on Cloud and DC alike.
         const c = await tryJson(`/rest/api/content/${id}?expand=space,version`);
         if (c) {
@@ -317,12 +341,10 @@ export async function probePage(): Promise<ProbeResult> {
         } else if (flavour === 'cloud') {
           const order: ContentKind[] = typeKnown && kind !== 'unknown' && kind !== 'space' ? [kind] : ['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed'];
           for (const k of order) {
-            const v = await tryJson(`/api/v2/${k === 'page' ? 'pages' : k + 's'}/${id}`);
+            const v = await tryJson(v2Path(k));
             if (v) {
               kind = k;
-              title = v.title;
-              lastUpdated = v.version?.createdAt ?? v.createdAt;
-              if (v.spaceId !== undefined && v.spaceId !== null) spaceId = String(v.spaceId);
+              fromV2(v);
               break;
             }
           }
@@ -338,7 +360,10 @@ export async function probePage(): Promise<ProbeResult> {
     if (!title && flavour === 'server' && id && id === meta('ajs-page-id')) title = meta('ajs-page-title');
 
     const userDisplayName = await userP;
-    const siteTitle = meta('ajs-site-title');
+    // DC omits ajs-site-title on blog posts and the dashboard; its <title> ends with the site name
+    // ("Page - Space - Site").
+    const titleParts = flavour === 'server' ? document.title.split(' - ') : [];
+    const siteTitle = meta('ajs-site-title') ?? (titleParts.length >= 3 ? titleParts[titleParts.length - 1]!.trim() || undefined : undefined);
 
     return {
       isConfluence: true,

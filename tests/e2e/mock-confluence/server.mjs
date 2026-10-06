@@ -12,6 +12,10 @@
  *  - `/descendants` returns items in a deliberately NON-tree order.
  *  - Content flagged `forbidden` answers 403; content flagged `throttleOnce` answers 429 with
  *    `Retry-After: 1` on its first export_view request (after each reset).
+ *  - `config.publicAccess`: a public site — API and attachments answer without the session cookie
+ *    (anonymous), and `/rest/api/user/current` says `{type: "anonymous"}` without it.
+ *  - `config.dropPath` / `config.dropCount`: the next `dropCount` requests whose path contains
+ *    `dropPath` get their connection destroyed (a network error in the browser).
  *  - Control endpoints (not logged): GET /__control/log, /__control/reset, /__control/config?delayMs=&imageDelayMs=
  *
  * Standalone: `node tests/e2e/mock-confluence/server.mjs [port] [cloud|server]`.
@@ -144,9 +148,14 @@ export async function startMockConfluence(o = {}) {
   const state = {
     log: [],
     throttled: new Set(),
-    config: { delayMs: 0, imageDelayMs: 0 },
+    config: { delayMs: 0, imageDelayMs: 0, publicAccess: false, dropPath: '', dropCount: 0 },
   };
   let origin = '';
+  const resetState = () => {
+    state.log.length = 0;
+    state.throttled.clear();
+    Object.assign(state.config, { delayMs: 0, imageDelayMs: 0, publicAccess: false, dropPath: '', dropCount: 0 });
+  };
 
   const ids = Object.keys(CONTENT);
   const get = (id) => (Object.hasOwn(CONTENT, id) ? CONTENT[id] : undefined);
@@ -284,10 +293,7 @@ ${metas.map(([n, v]) => `<meta name="${n}" content="${escapeHtml(v)}">`).join('\
       res.setHeader('Access-Control-Allow-Origin', '*');
       if (p === '/__control/log') return json(res, 200, state.log);
       if (p === '/__control/reset') {
-        state.log.length = 0;
-        state.throttled.clear();
-        state.config.delayMs = 0;
-        state.config.imageDelayMs = 0;
+        resetState();
         return json(res, 200, { ok: true });
       }
       if (p === '/__control/config') {
@@ -300,6 +306,11 @@ ${metas.map(([n, v]) => `<meta name="${n}" content="${escapeHtml(v)}">`).join('\
     state.log.push({ method: req.method, path: p + url.search, host: req.headers.host, cookie: hasSession(req), at: Date.now() });
 
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { message: 'Read-only mock' });
+    if (state.config.dropCount > 0 && state.config.dropPath && (p + url.search).includes(state.config.dropPath)) {
+      state.config.dropCount--;
+      req.socket.destroy();
+      return;
+    }
     if (p === '/favicon.ico') return send(res, 404, '');
     if (!p.startsWith(ctx + '/') && p !== ctx) return notFound(res);
     p = p.slice(ctx.length) || '/';
@@ -328,8 +339,13 @@ ${metas.map(([n, v]) => `<meta name="${n}" content="${escapeHtml(v)}">`).join('\
       if (id && get(id)) return send(res, 200, htmlPage(id, url), cookie);
     }
 
-    // ── everything below needs the session cookie ──
-    if (!hasSession(req)) {
+    // ── everything below needs the session cookie (unless the site is public) ──
+    if (!hasSession(req) && state.config.publicAccess && (p === '/rest/api/user/current' || p === '/rest/api/user')) {
+      return p === '/rest/api/user'
+        ? json(res, 403, { statusCode: 403, message: 'User not permitted to view user profiles' })
+        : json(res, 200, { type: 'anonymous', displayName: 'Anonymous' });
+    }
+    if (!hasSession(req) && !state.config.publicAccess) {
       return json(res, 401, { statusCode: 401, message: 'This resource requires authentication (no session cookie).' });
     }
 
@@ -488,12 +504,7 @@ ${metas.map(([n, v]) => `<meta name="${n}" content="${escapeHtml(v)}">`).join('\
     url: (path) => origin + ctx + path,
     log: state.log,
     config: state.config,
-    reset() {
-      state.log.length = 0;
-      state.throttled.clear();
-      state.config.delayMs = 0;
-      state.config.imageDelayMs = 0;
-    },
+    reset: resetState,
     close: () =>
       new Promise((resolve) => {
         server.closeAllConnections?.();

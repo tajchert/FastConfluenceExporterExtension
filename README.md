@@ -92,6 +92,8 @@ its breadcrumb and a checkbox so you can drop pages. You get a warning when an e
 
 - **In your browser.** There is no backend and no API token. The extension calls Confluence's
   REST API **on the same site you are viewing**, using the session you are already logged in with.
+  Public sites work without signing in: pages anyone can read export anonymously (the cover then
+  has no "exported by").
 - **Read-only.** It only sends `GET` requests and never changes anything in Confluence.
 - **You only see what you can already see.** Confluence enforces your own permissions.
 - **No data leaves your device.** There is no analytics, telemetry or remote logging. The PDF is
@@ -161,6 +163,8 @@ npm run dev:edge     # same, in Microsoft Edge
 npm run compile      # TypeScript type check
 npm test             # unit tests (Vitest + happy-dom)
 npm run test:e2e     # E2E tests (Playwright, against a local mock Confluence)
+npm run test:live    # opt-in: the real extension against two public Confluence sites (network needed)
+npm run screenshots  # regenerate the Web Store screenshots in store/screenshots/ (uses the public ASF wiki)
 npm run build        # production build in .output/chrome-mv3
 npm run zip          # store-ready ZIP in .output/
 npm run zip:edge     # Edge Add-ons ZIP
@@ -171,7 +175,10 @@ npm run check:release  # release gate: no template placeholders left, license no
 
 Architecture, module contracts and the API findings the implementation relies on are documented
 in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The test strategy and the manual QA checklist
-are in [docs/TESTING.md](docs/TESTING.md).
+are in [docs/TESTING.md](docs/TESTING.md). The live suite (`npm run test:live`) is not part of the
+default CI run: it exports a few small pages from the public Apache Software Foundation wiki
+(Data Center) and a public Confluence Cloud space, as an anonymous visitor, to catch differences
+between the mock and real Confluence. See [docs/TESTING.md § Live tests](docs/TESTING.md#live-tests).
 
 ```
 entrypoints/   background (service worker), worker + live content scripts, popup, preview, options, offscreen
@@ -180,7 +187,7 @@ lib/           confluence (API client, URL parsing, collection), assemble (sanit
 components/    shared Preact components
 public/        icons, _locales, managed policy schema
 store/         Web Store / Edge listing texts and promo images
-tests/         unit (Vitest) and e2e (Playwright)
+tests/         unit (Vitest), e2e (Playwright + mock Confluence) and live (Playwright + public sites)
 ```
 
 ### Releasing
@@ -241,7 +248,7 @@ The extension does **not** request the `tabs`, `cookies`, `history`, `webRequest
 | Images are grey boxes with a filename | The image could not be loaded (deleted, no permission, or a timeout). Check that you can open the image in Confluence and try again. |
 | A diagram or chart is missing | Turn on **Live render**. If the macro isn't detected, add its name to the live-render macro list in the options. |
 | "Throttled by Confluence, retrying…" | Confluence is rate-limiting requests. The export continues on its own. Lower *API concurrency* in the options if it happens often. |
-| Pages listed as *skipped* | You don't have permission to view them, or they were deleted, archived or are drafts. With a managed list of blocked spaces, a linked page whose space can't be determined is skipped as well. |
+| Pages listed as *skipped* | You don't have permission to view them, or they were deleted, archived or are drafts. On a public site without signing in, pages that aren't public are skipped too ("This page isn't public"): sign in to include them. With a managed list of blocked spaces, a linked page whose space can't be determined is skipped as well. |
 | You are logged out or SSO expired | The export stops with a sign-in message. Log in to Confluence in a normal tab, then export again. |
 | "An export helper tab was closed" | The extension prints from a background tab next to your page (and, for live render, a few more). Closing it (or its window) stops the export. Leave these tabs alone until the export finishes; they close themselves. |
 | The keyboard shortcut does nothing | Another extension may use **Alt+Shift+P**. Change the shortcut at `chrome://extensions/shortcuts`. |

@@ -1,11 +1,12 @@
 # Testing
 
-Testing has three layers:
+Testing has four layers:
 
 | Layer | Tooling | Runs in CI | What it proves |
 |---|---|---|---|
-| Unit | Vitest + happy-dom (`tests/unit/*.test.ts`) | Yes | Pure logic: URL parsing, tiny-link decoding, pagination, collection order, link extraction, sanitizer, macro detection, filenames, settings and policy validation, PDF merge/outline, zip |
+| Unit | Vitest + happy-dom (`tests/unit/*.test.ts`) | Yes | Pure logic: URL parsing, tiny-link decoding, pagination, collection order, link extraction, sanitizer, macro detection, session checks, filenames, settings and policy validation, PDF merge/outline, zip |
 | E2E | Playwright + the built extension + a local mock Confluence (`tests/e2e/`) | Yes | The whole pipeline in a real Chromium: popup / preview → worker tab → printToPDF → live render → pdf-lib → download |
+| Live | Playwright + the built extension + two **public** Confluence sites (`tests/live/`) | Opt-in: weekly + manual workflow | The mock's assumptions still hold for real Cloud and Data Center, as an anonymous visitor |
 | Manual QA | The checklist below, on real Cloud and Data Center sites | Before each release | Real-world fidelity, performance, store-review behavior |
 
 ## Unit tests
@@ -31,8 +32,11 @@ Conventions:
   from [ARCHITECTURE.md §1](ARCHITECTURE.md#1-spike-findings-verified-on-a-real-confluence-cloud-site-2026-10-06).
   Always cover v2 (Cloud) and v1 (Data Center) shapes, and both a root context path (`''`) and
   a `/confluence` context path.
-- Use only synthetic fixtures (made-up spaces, titles and people). **Never** commit content copied
-  from a real Confluence site.
+- Use synthetic fixtures (made-up spaces, titles and people). **Never** commit content copied
+  from a private or company Confluence site. The one exception is
+  `tests/unit/fixtures/publicSites.ts`: small, trimmed markup and REST excerpts observed on the two
+  public sites of the live suite (structure only, people replaced by made-up names), each with its
+  source page id. Keep additions there small and from those public sites only.
 
 ## E2E tests
 
@@ -62,7 +66,8 @@ node tests/e2e/mock-confluence/server.mjs 8090 cloud   # the mock on its own (or
 - `tests/e2e/mock-confluence/server.mjs` (plain Node, no dependencies) emulates Confluence Cloud
   under `/wiki` (HTML pages with `ajs-*` metas, REST v2 and v1) and Data Center under
   `/confluence` (v1 only, served as `localhost` so the two sites never share cookies). It
-  requires the session cookie its HTML pages set, paginates with a page size of 2, returns
+  requires the session cookie its HTML pages set (unless `config.publicAccess` makes it a public
+  site that answers anonymously), can drop connections (`config.dropPath`/`dropCount`), paginates with a page size of 2, returns
   descendants in non-tree order, answers 403 for one page, 429 + `Retry-After: 1` once for
   another, 404 for one image, and serves a real PNG. "Hostile Page" (109) serves known HTML-injection
   vectors (`hostile.mjs`, shared with the sanitizer unit test) whose payloads would request
@@ -88,13 +93,55 @@ resolving to the real sections; (l) entire space; (m) manual selection in tree o
 concurrent exports; (o) hostile export_view: no injection vector runs in the worker tab (real
 Chromium), no foreign requests; (p) session expires mid-export → one sign-in error, no per-page
 "no permission" noise; (r) preview collection cancelled, and closing the preview closes its
-helper tab.
+helper tab; (s) public site, not signed in: the export runs anonymously, a page whose request
+fails at the network level is skipped (no "please log in"), a non-public page says so.
 
 Not covered by E2E (Chrome UI the tests cannot drive): the runtime permission prompt and the
 `pendingStart` hand-off (unit-tested: `claimPendingStart` starts a pending export once), the
 keyboard shortcut, the context menu (its link patterns are unit-tested), notifications, the
 "Save as" dialog (cancel/timeout behaviour is unit-tested in `download.test.ts`) and the
 debugger-unavailable fallback. Check them manually (below).
+
+## Live tests
+
+```bash
+npx playwright install chromium  # once
+npm run test:live                # = npm run build:live && playwright test -c playwright.live.config.ts
+LIVE_SKIP=uconn.atlassian.net npm run test:live   # leave one site out
+HEADED=1 npm run test:live       # watch the browser
+```
+
+**What.** `tests/live/*.spec.ts` load the real extension (`npm run build:live` →
+`.output/chrome-mv3-live`) into Playwright's Chromium and export from two public Confluence
+sites, without signing in:
+
+| Site | Flavour | Tests (`tests/live/`) |
+|---|---|---|
+| [cwiki.apache.org](https://cwiki.apache.org/confluence) (Apache Software Foundation) | Data Center 9.2, context path `/confluence` | `apache-dc.spec.ts`: popup detection on the "Community Over Code" home page; that page as one PDF (title, outline, every image loaded, GET only); a small, inactive subtree (COMDEV 199529919) in tree order with matching bookmarks; linked pages from KIP-1342 (a tiny link and a `/display/` title link, both internal in the PDF); the preview list |
+| [uconn.atlassian.net](https://uconn.atlassian.net/wiki/spaces/AI/overview) ("AI" space) | Cloud | `uconn-cloud.spec.ts`: popup detection on the space overview; a page with attachment images (media redirect) as one PDF; a small subtree; a folder export |
+
+**Why.** The mock (tests/e2e) encodes what we believe Confluence does. These sites check it
+against the real thing: worker tab on a JSON endpoint, anonymous access (a public site is not a
+"logged out" error), tree listings and ordering, export_view markup, images from other hosts.
+The findings that shaped the code are in [ARCHITECTURE.md §1](ARCHITECTURE.md).
+
+**How.** The `live` build mode (`wxt.config.ts`) adds install-time `host_permissions` for
+exactly these two origins; production builds have none (CI checks the production manifest).
+Assertions check ids and structure (tree order, bookmarks mirror the page list, internal links
+resolve, image failures, anonymous metadata), never page text or exact page counts: the UConn
+space is edited actively. `retries: 1`, generous timeouts, and every test **skips** (with the
+reason) when its site cannot be reached, so an outage is not a red build. It runs weekly and on
+demand in GitHub Actions (`.github/workflows/live.yml`), never in the default CI run.
+
+**Politeness.** These are community-run servers. The suite uses one worker, sets API
+concurrency to 2, keeps every export at ≤ 15 pages, never runs live render, and never crawls.
+Don't add tests that export whole spaces, loop over many pages, or run on every push. While
+exploring, cache responses locally instead of re-fetching.
+
+**Store screenshots** (`npm run screenshots`, `scripts/store-screenshots.mjs`) use the same live
+build against the ASF wiki: popup, preview, result, PDF pages (rasterized with `pdftoppm` from
+poppler) and options, composed at 1280×800 into `store/screenshots/`. They hide the page byline
+(no people in marketing images).
 
 ## Manual QA checklist
 
@@ -134,7 +181,7 @@ Gliffy diagram (if the app is installed), and a page that a second test user can
 - [ ] A page **without view permission** (log in as the second user) is **skipped and reported**. The rest exports fine.
 - [ ] Pages with **draw.io / Gliffy** diagrams show the diagram with **Live render** on. With it off, a placeholder or static image appears and nothing breaks.
 - [ ] **Cancel** stops the job within **2 s**, also right after clicking Export (while the helper tab is still opening) and while Chrome's "Save as" dialog is open (the dialog's download is cancelled; no file appears). Afterwards there are **no orphan tabs**, no debugging bar, and no stale `chrome.debugger` session (the next export works).
-- [ ] Close the preview without exporting: its helper tab (`…/rest/api/space?limit=1`) closes within a few seconds. Quit Chrome during an export with "Continue where you left off" on: after the restart, restored helper tabs close by themselves.
+- [ ] Close the preview without exporting: its helper tab (`…/api/v2/spaces?limit=1` on Cloud, `…/rest/api/space?limit=1` on Data Center) closes within a few seconds. Quit Chrome during an export with "Continue where you left off" on: after the restart, restored helper tabs close by themselves.
 - [ ] **Network:** in DevTools for the service worker, the worker tab and the extension pages, the extension's own requests go only to the Confluence origin being exported (no analytics, fonts or CDNs). Images embedded in pages from other hosts load from those hosts, without a `Referer` header.
 - [ ] **Read-only:** every request to Confluence is a `GET`.
 - [ ] Works on the **latest stable Chrome and Edge** on **macOS and Windows**.
@@ -174,7 +221,8 @@ Gliffy diagram (if the app is installed), and a page that a second test user can
 ### Robustness
 
 - [ ] Another debugger is attached (open DevTools on the worker tab before printing, or run a second debugging extension): the export falls back to the print dialog with a clear message.
-- [ ] Session expired or logged out (also mid-export, e.g. sign out in another tab): a clear sign-in error, and no partial file.
+- [ ] Session expired or logged out (also mid-export, e.g. sign out in another tab): a clear sign-in error, and no partial file. On Data Center, where content you can't see answers 404, this still shows as one sign-in error, not as a list of skipped pages.
+- [ ] A public site (Cloud or DC) without signing in: pages export anonymously (no "exported by"), and pages that aren't public are skipped with "This page isn't public".
 - [ ] A Confluence request that never answers (e.g. a stalled proxy) times out and the export finishes or fails cleanly instead of hanging.
 - [ ] A 100-page export finishes in ≤ 2 min without a tab crash. Watch memory in Chrome's Task Manager; peak should be < 1.5 GB.
 - [ ] Two exports started one after another: both finish, with no interference between them.

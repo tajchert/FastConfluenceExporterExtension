@@ -97,7 +97,7 @@ export function createClient(site: SiteInfo, http?: HttpOptions): ConfluenceClie
 
 // ───────────────────────────── helpers shared by the implementations ─────────────────────
 
-const CONTENT_TYPES = new Set<ContentType>(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed']);
+const CONTENT_TYPES = new Set<ContentType>(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed', 'slides']);
 
 /** Normalizes API type strings (`page`, `blogpost`, `blog_post`, `folder`, ...). */
 export function toContentType(t: unknown): ContentType | null {

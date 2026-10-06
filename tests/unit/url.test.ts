@@ -96,6 +96,11 @@ describe('parseConfluenceUrl — Cloud', () => {
   it('parses tiny links', () => {
     expect(p('/wiki/x/phDOEg')).toEqual({ kind: 'tiny', tinyCode: 'phDOEg', id: '315494566' });
   });
+  it('parses the tinyurl.action URL Cloud redirects tiny links to', () => {
+    // uconn.atlassian.net: /x/k4FfpAY → /pages/tinyurl.action?urlIdentifier=k4FfpAY (the space homepage).
+    expect(p('/wiki/pages/tinyurl.action?urlIdentifier=k4FfpAY')).toEqual({ kind: 'tiny', tinyCode: 'k4FfpAY', id: '28527526291' });
+    expect(p('/wiki/pages/tinyurl.action')).toEqual({ kind: 'unknown' });
+  });
   it('parses legacy action URLs', () => {
     expect(p('/wiki/pages/viewpage.action?pageId=321')).toEqual({ kind: 'page', id: '321' });
     expect(p('/wiki/plugins/viewsource/viewpagesrc.action?pageId=321')).toEqual({ kind: 'page', id: '321' });

@@ -23,6 +23,8 @@ export interface LinkTargets {
   types: Record<string, ContentType>;
   titles: TitleTarget[];
   tinyCodes: string[];
+  /** Links to a space itself (`/spaces/KEY/overview`, `/display/KEY`): its homepage is the target. */
+  spaceKeys: string[];
 }
 
 const RESOURCE_TYPES: Record<string, ContentType> = {
@@ -33,16 +35,19 @@ const RESOURCE_TYPES: Record<string, ContentType> = {
   whiteboard: 'whiteboard',
   database: 'database',
   embed: 'embed',
+  slides: 'slides',
 };
 /** Paths (relative to the context path) that never point at exportable content. */
 const IGNORED_PATH = /^\/(download|browse|people|images|s|plugins\/servlet|secure|rest|api)\//i;
 const IGNORED_ACTION = /\/viewpageattachments\.action$/i;
+const SPACE_HOME_PATH = /^\/(?:spaces\/[^/]+(?:\/overview)?|display\/[^/]+)\/?$/;
 
 class Collector {
   private readonly idSet = new Set<string>();
   private readonly titleSet = new Set<string>();
   private readonly codeSet = new Set<string>();
-  readonly out: LinkTargets = { ids: [], types: {}, titles: [], tinyCodes: [] };
+  private readonly spaceSet = new Set<string>();
+  readonly out: LinkTargets = { ids: [], types: {}, titles: [], tinyCodes: [], spaceKeys: [] };
 
   constructor(
     private readonly site: SiteInfo,
@@ -104,6 +109,15 @@ class Collector {
     // A personal space's profile (`/display/~user`), not a page in it (`/display/~user/Title`).
     if (/^\/display\/~[^/]+\/?$/.test(path)) return;
     const p = parseConfluenceUrl(abs.toString(), this.site.contextPath);
+    // A link to the space itself (its overview = the homepage). Other `/spaces/KEY/…` shapes that
+    // parse as "space" (page lists, calendars, …) are not followed; neither are personal spaces.
+    if (p.kind === 'space' && p.spaceKey && !p.spaceKey.startsWith('~') && SPACE_HOME_PATH.test(path)) {
+      if (!this.spaceSet.has(p.spaceKey)) {
+        this.spaceSet.add(p.spaceKey);
+        this.out.spaceKeys.push(p.spaceKey);
+      }
+      return;
+    }
     switch (p.kind) {
       case 'page':
       case 'blogpost':
@@ -137,7 +151,11 @@ export function extractLinksFromExportView(html: string, site: SiteInfo, selfId:
     const resId = el.getAttribute('data-linked-resource-id');
     if (resType) {
       const type = RESOURCE_TYPES[resType];
-      if (!type) continue; // attachment, userinfo, space, ...
+      if (!type) {
+        // A space link resolves to the space's homepage; attachments, users, … are not followed.
+        if (resType === 'space' && el.tagName === 'A') c.addUrl(el.getAttribute('href'));
+        continue;
+      }
       if (resId && /^\d+$/.test(resId)) {
         c.addId(resId, type);
         continue;

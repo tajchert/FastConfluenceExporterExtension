@@ -1,0 +1,49 @@
+name: Live sites
+
+# Opt-in live suite (tests/live): the real extension in Playwright's Chromium against two public
+# Confluence sites (cwiki.apache.org, uconn.atlassian.net) as an anonymous visitor. Not part of
+# the default CI run: it depends on third-party sites and their content. Weekly, plus on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 5 * * 1' # Mondays 05:23 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-sites
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  live:
+    name: Live sites (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      # The suite is polite by design (one worker, API concurrency 2, ≤ 15 pages per export);
+      # unreachable sites make their tests skip instead of fail.
+      - name: Live tests
+        run: xvfb-run --auto-servernum npm run test:live
+        env:
+          CI: 'true'
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-live
+          path: |
+            playwright-report-live
+            test-results/live
+          retention-days: 14

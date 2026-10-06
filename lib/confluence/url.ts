@@ -75,6 +75,14 @@ function parseAction(raw: string[], q: URLSearchParams): ParsedConfluenceUrl | n
   if (!last || !last.toLowerCase().endsWith('.action')) return null;
   const action = last.toLowerCase();
   const editor = EDITOR_ACTIONS.has(action) || undefined;
+  // Cloud redirects `/x/{code}` to `/pages/tinyurl.action?urlIdentifier={code}` (then the SPA
+  // rewrites the address on the client).
+  if (action === 'tinyurl.action') {
+    const code = (q.get('urlIdentifier') ?? '').trim();
+    if (!code) return { kind: 'unknown' };
+    const id = decodeTinyCode(code);
+    return { kind: 'tiny', tinyCode: code, ...(id ? { id } : {}) };
+  }
   const pageId = q.get('pageId') ?? q.get('contentId') ?? (action === 'resumedraft.action' ? q.get('draftId') : null);
   if (pageId && NUMERIC.test(pageId)) return { kind: 'page', id: pageId, ...(editor ? { editor } : {}) };
   const spaceKey = q.get('spaceKey') ?? q.get('key') ?? undefined;

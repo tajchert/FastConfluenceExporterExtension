@@ -47,6 +47,7 @@ tab crash; one failing page never fails the whole export; only GET requests to t
   (keys: `id,type,status,title,space,version,ancestors,body,_links`). DC/Server only has v1.
 - `export_view` HTML characteristics:
   - Images are **absolute same-origin** URLs: `https://site/wiki/download/attachments/{pageId}/{file}?version=…&api=v2`
+    (some Cloud sites omit `version=`, and the attachment redirects to `api.media.atlassian.com`)
     plus icons like `/wiki/images/icons/grey_arrow_down.png`. They load with cookies in a
     same-origin tab. (Atlassian Media URLs may still appear on some sites → handle generically:
     any `<img>` that fails gets a placeholder.)
@@ -58,7 +59,10 @@ tab crash; one failing page never fails the whole export; only GET requests to t
     across pages in a combined doc → **prefix ids and same-page hrefs per page** (`p{pageId}-…`).
   - User mentions: `a.confluence-userlink.user-mention` → keep as text with link.
   - Jira macro renders as a static table (`table.aui` with `td.jira-macro-table-underline-pdfexport`)
-    with links to `/browse/KEY-1`. Keep it (it is static).
+    with links to `/browse/KEY-1`. Keep it (it is static). DC starts that table with an empty
+    `<tr></tr>` before the header row. Cloud's newer Jira work-items datasource renders
+    `table.jiraWorkItemMacroListViewTable` whose `<tbody>` is filled in the browser: an empty one
+    becomes a placeholder (FR-9).
   - `iframe` macro renders a real `<iframe src=…>` → replace with placeholder + link (FR-9).
   - Expand macro: `.expand-container > .expand-control + .expand-content` → force open, hide control.
   - Classes seen: `confluence-information-macro(-information|-note|-warning|-tip)`, `-icon`, `-body`,
@@ -100,13 +104,64 @@ tab crash; one failing page never fails the whole export; only GET requests to t
   survive batch merging and live-page inserts.
 - No draw.io / Gliffy on the spike site; their export_view output is unverified → live render
   detection is based on storage/export markers (configurable list) and must degrade gracefully.
+  (Verified later on Data Center, see §1b.)
+
+## 1b. Public sites, anonymous access (verified 2026-10-06)
+
+Checked against `uconn.atlassian.net` (Cloud) and `cwiki.apache.org/confluence` (Data Center
+9.2.21) without signing in. The opt-in live suite (`tests/live`, [TESTING.md](TESTING.md#live-tests))
+keeps checking these.
+
+- **Anonymous is a valid session.** `GET /rest/api/user/current` answers
+  `{"type":"anonymous","displayName":"Anonymous"}`; `ajs-remote-user`,
+  `ajs-current-user-fullname` (and on Cloud `ajs-atlassian-account-id`) are present but empty.
+  Content, tree listings, CQL and attachments all work. The worker records the session at the
+  start of a fetch (`lib/confluence/session.ts`) and treats a failure as "signed out" only when
+  that changed (signed in → anonymous / login page), so a network hiccup on a public site skips
+  one page instead of aborting with "please log in". DC answers **404** (not 401) for content an
+  anonymous visitor can't see, so for a job that started signed in, 403/404 also trigger the
+  one-time session check; for an anonymous job they are reported as "This page isn't public".
+- **User profiles are hidden**: `/rest/api/user?accountId=` answers 403 for anonymous visitors
+  → the Cloud client stops author lookups after the first 403 (no author in the page header).
+- **Worker tab**: `{base}/rest/api/space?limit=1` and (Cloud) `{base}/api/v2/spaces?limit=1` both
+  answer 200 JSON without CSP, also anonymously. Cloud v1 responses carry `Deprecation` and
+  `Warning: 299 … will be removed` headers but still work; the Cloud worker tab and the popup
+  probe for Cloud pages use v2 first.
+- **Tiny links**: Cloud redirects `/x/{code}` to `/pages/tinyurl.action?urlIdentifier={code}`
+  (then the SPA rewrites the URL), so both URL parsers read `urlIdentifier`.
+- **Tree listings**: `direct-children` items have no `parentId`; `childPosition` values range
+  widely (128 … 952556969) and sort numerically. There is no space-level `direct-children`
+  (400: hierarchical types are `DATABASES, EMBEDS, FOLDERS, PAGES, SLIDES, WHITEBOARDS`), and
+  `spaces/{id}/pages?depth=root` lists pages only → non-page items at a space root come from CQL
+  `space = "KEY" and type in (folder, whiteboard, database, embed)` with
+  `expand=content.ancestors` (empty ancestors = root). `slides` is a link-only content type.
+  DC 9 ignores `expand=childTypes.page` (so `hasChildren` stays unknown) and `extensions.position`
+  is `"none"` for siblings never reordered; `expand=space` on every child doubled the payload →
+  children inherit the parent's space instead.
+- **export_view has no `data-macro-name`** on either site. Live-render detection therefore also
+  looks at class names (only the outermost element of a class match, ignoring image maps and
+  hidden settings: DC Gliffy is `span.gliffy-container > img.gliffy-image + map.gliffy-dynamic`,
+  DC draw.io is a plain `img.drawio-diagram-image`), and on Cloud it relies on the storage format.
+- **DC markup**: page tree = `div.plugin_pagetree` (empty list + `fieldset.hidden` settings) →
+  placeholder; AUI's `.hidden` rows (attachments macro details, macro settings) are dropped;
+  a single Jira issue (`span.jira-issue`) prints "Getting issue details… STATUS" until the browser
+  fills it → only the issue key link is kept. Links between pages also come as
+  `/display/KEY/Title` and `viewpage.action?spaceKey=&title=`: they become internal links through
+  a title index of the exported pages (`SanitizeContext.pageIndex`).
+- **Cloud markup**: links to another page's heading use editor-style fragments
+  (`#Included-Models`) while export_view ids are `PageTitle-IncludedModels` → matched loosely
+  (case, hyphens and spaces ignored). Space links (`/spaces/KEY/overview`) carry no resource id:
+  linked mode follows them to the space homepage, and they become internal links when the
+  homepage is exported. Legacy text colours come as `legacy-color-text-*` classes (print.css
+  maps them). The "recently updated" macro's spinner and "Show More" are dropped.
+- No `X-RateLimit-*`/`Retry-After` headers and no 429s were seen at ≤ 2 requests per second.
 
 ## 2. Execution contexts
 
 | Context | File | Role |
 |---|---|---|
 | Service worker | `entrypoints/background.ts` → `lib/job/*`, `lib/render/*`, `lib/pdf/*`, `lib/download.ts` | Orchestrator: job state machine, worker/live tabs, `chrome.debugger` printing, pdf-lib post-processing, downloads, notifications, context menus, keyboard command, permission-grant follow-up. **No DOM** (no DOMParser, no URL.createObjectURL). |
-| Worker tab content script | `entrypoints/worker.ts` (unlisted script → `/worker.js`) | Injected with `chrome.scripting.executeScript({files:['/worker.js']})` into a background tab opened on `{base}/rest/api/space?limit=1#cfp-worker`. RPC server for `SwToWorker`. Does **all Confluence API calls** (same-origin, cookies) via `lib/confluence/*`, keeps fetched HTML in memory (plus a bounded LRU of page bodies shared by the preview's collection and the export's fetch), and **assembles the print document into its own DOM** via `lib/assemble/*`. The SW then prints this tab. Long operations (`worker/collect`, `worker/fetch`) run in the background and report their outcome with a `worker/done` notification (see §5 Service-worker lifetime). |
+| Worker tab content script | `entrypoints/worker.ts` (unlisted script → `/worker.js`) | Injected with `chrome.scripting.executeScript({files:['/worker.js']})` into a background tab opened on `workerTabUrl(site)#cfp-worker` (Cloud `{base}/api/v2/spaces?limit=1`, DC `{base}/rest/api/space?limit=1`). RPC server for `SwToWorker`. Does **all Confluence API calls** (same-origin, cookies) via `lib/confluence/*`, keeps fetched HTML in memory (plus a bounded LRU of page bodies shared by the preview's collection and the export's fetch), and **assembles the print document into its own DOM** via `lib/assemble/*`. The SW then prints this tab. Long operations (`worker/collect`, `worker/fetch`) run in the background and report their outcome with a `worker/done` notification (see §5 Service-worker lifetime). |
 | Live render script | `entrypoints/live.ts` (unlisted → `/live.js`) | Injected into real Confluence page tabs for FR-10: expand macros, hide app chrome, wait for macro render, answer `live/prepare`. |
 | Popup | `entrypoints/popup/` | Probe active tab (activeTab + `executeScript({func: probePage})`), mode picker, request site permission, start "This page" export, open preview for multi-page modes. |
 | Preview tab | `entrypoints/preview/` (`/preview.html?req=<base64url JSON ExportRequest>`) | FR-6 tree picker, FR-7 preview & pruning (with breadcrumbs), FR-12 progress / cancel / error summary, FR-16 large-export guard. Collects pages over a UI port (`UI_PORT_NAME`, `components/collectClient.ts`): progress, "Throttled by Confluence, retrying…" and Cancel; closing the page cancels its collection and closes the idle helper tab. |
@@ -128,7 +183,7 @@ Shared code lives in `lib/`; shared Preact components in `components/`; UI CSS i
    (fire-and-forget, keeps the user gesture), so an old, denied popup request never starts on an
    unrelated grant. The context menu never prompts (see §5 Permissions).
 3. **Worker tab**: SW `openWorkerTab(site, nearTabId, signal)` → inactive tab at the end of the
-   source window, URL `{base}/rest/api/space?limit=1#cfp-worker`, waits for `complete`, injects
+   source window, URL `workerTabUrl(site)` + `#cfp-worker`, waits for `complete`, injects
    `/worker.js`, pings until ready. `waitForTabComplete` also polls `tabs.get`: a lazily added
    `onUpdated` listener can miss a fast page's `complete` while `tabs.get` still answers `loading`
    (seen in real Chrome on the first export after the service worker started). One worker tab per
@@ -143,9 +198,12 @@ Shared code lives in `lib/`; shared Preact components in `components/`; UI CSS i
    `maxPages`) count pages, not folder rows.
 6. **Fetch** (worker, background op): pool (settings.apiConcurrency), 429 back-off, per-attempt
    timeouts, per-page `FetchedPageInfo` (permission errors → skipped, never fatal). One request per
-   page on Cloud (v2 export_view; space key, author and breadcrumb from cached lookups). A 401
-   (or a network failure) triggers one session check (`/rest/api/user/current`); a signed-out
-   session aborts the fetch with one sign-in error instead of N "no permission" skips. Detect
+   page on Cloud (v2 export_view; space key, author and breadcrumb from cached lookups). The
+   session at the start (signed in / anonymous, `lib/confluence/session.ts`) is read in parallel
+   with the first bodies. A 401 or a network failure (and, for a job that started signed in, a
+   403/404) triggers one session check; a session that went from signed in to anonymous or a
+   login page aborts the fetch with one sign-in error instead of N "no permission" skips. An
+   anonymous job on a public site keeps going (failed pages are skipped). Detect
    `needsLiveRender`.
 7. **Assemble + print**, in batches of `settings.printBatchSize` pages (normally one batch, max
    400): worker builds cover (first batch only) + TOC (first batch, lists *all* pages, levels from
@@ -250,6 +308,8 @@ export interface ConfluenceClient {
   findPageByTitle(spaceKey: string, title: string, lookup?: { type?: 'page' | 'blogpost'; postingDay?: string }): Promise<ContentSummary | null>;
   getCurrentUser(): Promise<{ displayName: string } | null>;
 }
+// ContentType = 'page' | 'blogpost' | 'folder' | 'whiteboard' | 'database' | 'embed' | 'slides'
+//   (folder = section header; whiteboard/database/embed/slides = link-only)
 // Caching rule (both clients): lookups are cached per client, but only successful or definitive
 // (403/404) answers; a transient failure is evicted and retried by the next call. Cloud v2
 // listings and DC v1 ancestors seed the content cache, so walking up a tree costs no requests.
@@ -257,8 +317,14 @@ export function createClient(site: SiteInfo, http?: HttpOptions): ConfluenceClie
 // cloud.ts: export class CloudClient implements ConfluenceClient (v2, v1/CQL fallbacks). getPageBody = one v2
 //            export_view request; getChildren = `direct-children` (hasChildren unknown); blog posts by title via v1
 //            (`postingDay`); type discovery: v2 pages → v1 content (also blog posts) → folders/whiteboards/databases/embeds
+//            getSpaceRoots = v2 `spaces/{id}/pages?depth=root` + CQL for non-page roots (§1b); user lookups stop after a 403
 // server.ts: export class ServerClient implements ConfluenceClient (DC/Server v1: /rest/api/content/{id}?expand=…,
-//            /rest/api/content/{id}/child/page?expand=extensions.position,childTypes.page,space)
+//            /rest/api/content/{id}/child/page?expand=extensions.position,childTypes.page; children inherit the parent's space)
+// session.ts
+export type SessionState = 'user' | 'anonymous' | 'signed-out' | 'unreachable';
+export function readSession(baseUrl: string, signal?: AbortSignal): Promise<SessionState>; // GET /rest/api/user/current
+export function needsSessionCheck(status: number | undefined, start: SessionState | undefined): boolean;
+export function sessionStillValid(start: SessionState | undefined, now: SessionState): boolean;
 
 // links.ts
 export interface LinkTargets {
@@ -266,6 +332,7 @@ export interface LinkTargets {
   types: Record<string, ContentType>;   // type of an id when the link tells it (no type discovery needed)
   titles: { spaceKey?: string; title: string; type?: 'blogpost'; postingDay?: string }[];
   tinyCodes: string[];
+  spaceKeys: string[];                   // links to a space itself (overview / `/display/KEY`) → its homepage
 }
 export function extractLinksFromExportView(html: string, site: SiteInfo, selfId: string): LinkTargets; // uses DOMParser
 export function extractLinksFromStorage(storage: string, site: SiteInfo, selfId: string): LinkTargets;
@@ -308,7 +375,9 @@ export interface SanitizeContext {
   /** id → in-document anchor for every page in the export (`#p-{id}`) */
   exportedIds: Set<string>;
   includeComments: boolean;
+  pageIndex?: PageIndex; // exported pages by `spaceKey + title` and by URL path (links without an id)
 }
+export function buildPageIndex(pages: { id: string; title?: string; spaceKey?: string; url?: string }[], site: SiteInfo): PageIndex;
 export function sanitizePageHtml(html: string, ctx: SanitizeContext): DocumentFragment;
 // DOMPurify (no scripts/handlers/forms/object/embed; iframes removed by macros first), strip UI chrome,
 // prefix ids + same-page anchors with `p{pageId}-`, rewrite links to exported pages to `#p-{id}`,
@@ -439,6 +508,7 @@ Talks to the SW only through `callSw()` from `lib/rpc.ts` and listens for `SwBro
 ## 5. Notes & decisions
 
 - **Why a JSON URL for the worker tab**: same-origin (cookies for API + images), no app JS, no CSP.
+  It also works for anonymous visitors of public sites (verified on Cloud and DC, §1b).
 - **Section start pages**: every `article.cf-page` has `id="p-{id}"`. Chrome only emits a named
   destination for an id that some `<a href="#id">` in the same printed document targets, so each
   print batch ends with a hidden `div.cf-dests` linking every article (works without a TOC and in

@@ -30,7 +30,7 @@ export const BLOCKED_MESSAGE = 'Blocked by your administrator';
 export const UNVERIFIED_SPACE_MESSAGE = "This page's space could not be checked against your administrator's policy.";
 export const SAVING_MESSAGE = 'Saving… (choose a location if Chrome asks)';
 
-const LINK_ONLY_TYPES = new Set(['folder', 'whiteboard', 'database', 'embed']);
+const LINK_ONLY_TYPES = new Set(['folder', 'whiteboard', 'database', 'embed', 'slides']);
 const WORKER_CLEANUP_TIMEOUT_MS = 800;
 
 export interface LiveRenderOpts {

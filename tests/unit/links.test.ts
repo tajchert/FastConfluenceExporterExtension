@@ -45,11 +45,25 @@ describe('extractLinksFromExportView', () => {
       <a class="confluence-userlink user-mention" href="https://acme.atlassian.net/wiki/spaces/~x/pages/777">mention</a>
       <a href="https://example.com/wiki/spaces/ENG/pages/888">external</a>
       <a href="mailto:a@b.c">mail</a>
-      <a href="https://acme.atlassian.net/wiki/spaces/ENG/overview">space</a>
+      <a href="https://acme.atlassian.net/wiki/spaces/ENG/pages">page list</a>
+      <a href="https://acme.atlassian.net/wiki/spaces/~5b12/overview">personal space</a>
       <img src="https://acme.atlassian.net/wiki/download/attachments/100/a.png" data-linked-resource-id="321" data-linked-resource-type="attachment">
     `;
     const t = extractLinksFromExportView(html, cloud, '100');
-    expect(t).toEqual({ ids: [], types: {}, titles: [], tinyCodes: [] });
+    expect(t).toEqual({ ids: [], types: {}, titles: [], tinyCodes: [], spaceKeys: [] });
+  });
+
+  it('follows links to a space (its homepage), not other space views', () => {
+    // Cloud renders space links without data-linked-resource-id (seen on a public Cloud site).
+    const html = `
+      <a href="https://acme.atlassian.net/wiki/spaces/ENG/overview">space</a>
+      <a href="/wiki/spaces/OPS" data-linked-resource-type="space">space 2</a>
+      <a href="https://acme.atlassian.net/wiki/spaces/ENG/overview?homepageId=1">again</a>
+      <a href="https://acme.atlassian.net/wiki/spaces/ENG/blog">blog list</a>
+    `;
+    const t = extractLinksFromExportView(html, cloud, '100');
+    expect(t.spaceKeys).toEqual(['ENG', 'OPS']);
+    expect(t.ids).toEqual([]);
   });
 
   it('does not treat a page slug that mentions attachments/download as ignored', () => {
@@ -79,7 +93,7 @@ describe('extractLinksFromExportView', () => {
   });
 
   it('returns empty targets for empty html', () => {
-    expect(extractLinksFromExportView('', cloud, '1')).toEqual({ ids: [], types: {}, titles: [], tinyCodes: [] });
+    expect(extractLinksFromExportView('', cloud, '1')).toEqual({ ids: [], types: {}, titles: [], tinyCodes: [], spaceKeys: [] });
   });
 });
 
@@ -112,6 +126,6 @@ describe('extractLinksFromStorage', () => {
 
   it('skips the page itself by id', () => {
     const storage = `<ac:link><ri:page ri:content-id="1" /></ac:link><a href="/wiki/spaces/A/pages/1">self</a>`;
-    expect(extractLinksFromStorage(storage, cloud, '1')).toEqual({ ids: [], types: {}, titles: [], tinyCodes: [] });
+    expect(extractLinksFromStorage(storage, cloud, '1')).toEqual({ ids: [], types: {}, titles: [], tinyCodes: [], spaceKeys: [] });
   });
 });

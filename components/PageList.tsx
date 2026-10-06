@@ -12,6 +12,7 @@ export const TYPE_ICON: Record<ContentType, IconName> = {
   whiteboard: 'board',
   database: 'table',
   embed: 'link',
+  slides: 'board',
 };
 
 export function TypeBadges({ type }: { type: ContentType }): JSX.Element | null {

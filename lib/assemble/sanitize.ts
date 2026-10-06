@@ -5,6 +5,7 @@
  * then DOMPurify runs as the last step so that nothing we produced can bypass it.
  */
 import DOMPurify from 'dompurify';
+import { parseConfluenceUrl } from '../confluence/url';
 import type { SiteInfo } from '../types';
 import { replaceUnsupportedContent } from './macros';
 
@@ -15,9 +16,67 @@ export interface SanitizeContext {
   /** id → in-document anchor for every page in the export (`#p-{id}`) */
   exportedIds: Set<string>;
   includeComments: boolean;
+  /**
+   * Exported pages by title and by URL path, for same-site links that carry no content id
+   * (DC `/display/KEY/Title`, `viewpage.action?spaceKey=&title=`, Cloud `/spaces/KEY/overview`).
+   */
+  pageIndex?: PageIndex;
 }
 
-const CONTENT_TYPES = new Set(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed']);
+export interface PageIndex {
+  /** `{spaceKey}\u0000{lower-cased title}` → id */
+  byTitle: Map<string, string>;
+  /** decoded URL path without trailing slash → id */
+  byPath: Map<string, string>;
+}
+
+function pathKey(url: URL): string {
+  return safeDecode(url.pathname).replace(/\/+$/, '');
+}
+
+function titleKey(spaceKey: string, title: string): string {
+  return `${spaceKey}\u0000${title.trim().toLowerCase()}`;
+}
+
+/** Index of the exported pages for `SanitizeContext.pageIndex`. */
+export function buildPageIndex(pages: { id: string; title?: string; spaceKey?: string; url?: string }[], site: SiteInfo): PageIndex {
+  const index: PageIndex = { byTitle: new Map(), byPath: new Map() };
+  for (const p of pages) {
+    if (p.spaceKey && p.title) {
+      const k = titleKey(p.spaceKey, p.title);
+      if (!index.byTitle.has(k)) index.byTitle.set(k, p.id);
+    }
+    if (p.url) {
+      try {
+        const u = new URL(p.url);
+        // Only paths that identify the content by themselves (no `?pageId=` query).
+        if (u.origin === site.origin && !u.search) {
+          const k = pathKey(u);
+          if (!index.byPath.has(k)) index.byPath.set(k, p.id);
+        }
+      } catch {
+        /* not a URL */
+      }
+    }
+  }
+  return index;
+}
+
+function indexedId(url: URL, ctx: SanitizeContext): string | null {
+  const index = ctx.pageIndex;
+  if (!index) return null;
+  if (!url.search) {
+    const byPath = index.byPath.get(pathKey(url));
+    if (byPath) return byPath;
+  }
+  const parsed = parseConfluenceUrl(url.href, ctx.site.contextPath);
+  if ((parsed.kind === 'page' || parsed.kind === 'blogpost') && parsed.title && parsed.spaceKey) {
+    return index.byTitle.get(titleKey(parsed.spaceKey, parsed.title)) ?? null;
+  }
+  return null;
+}
+
+const CONTENT_TYPES = new Set(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed', 'slides']);
 
 /** Confluence UI chrome that has no place on paper. */
 const CHROME_SELECTOR = [
@@ -38,6 +97,12 @@ const CHROME_SELECTOR = [
   '.refresh-wiki',
   '.copy-heading-link-container',
   '.heading-anchor-wrapper',
+  // AUI's display:none class: DC attachments macro rows and macro settings (`fieldset.hidden`),
+  // Cloud's "recently updated" parameters.
+  '.hidden',
+  // "Recently updated" macro: loading spinner and "Show more" link.
+  'img.waiting-image',
+  '.more-link-container',
 ].join(',');
 
 const PURIFY_CONFIG = {
@@ -74,6 +139,7 @@ export function sanitizePageHtml(html: string, ctx: SanitizeContext): DocumentFr
   for (const el of Array.from(body.querySelectorAll(CHROME_SELECTOR))) el.remove();
   replaceUnsupportedContent(body, { pageUrl: ctx.pageUrl });
 
+  fixJiraIssues(body);
   convertCheckboxes(body);
   markTaskLists(body);
   openExpands(body);
@@ -147,6 +213,22 @@ function glyph(doc: Document, checked: boolean, radio = false): HTMLElement {
   s.setAttribute('aria-hidden', 'true');
   s.textContent = radio ? (checked ? '◉' : '○') : checked ? '☑' : '☐';
   return s;
+}
+
+/**
+ * DC single-issue Jira macro: `span.jira-issue` holds the key link, a loading icon, a "Getting
+ * issue details..." summary and a "STATUS" lozenge that the browser fills in later. Keep the key
+ * link (and a summary that was really rendered); drop the placeholders and the dash before them.
+ */
+function fixJiraIssues(root: Element): void {
+  for (const issue of Array.from(root.querySelectorAll('.jira-issue[data-jira-key]'))) {
+    for (const ph of Array.from(issue.querySelectorAll('.issue-placeholder'))) ph.remove();
+    const summary = issue.querySelector('.summary');
+    if (!summary || !/^\s*getting issue details/i.test(summary.textContent || '')) continue;
+    const key = issue.querySelector('a.jira-issue-key, a[href]');
+    if (key) issue.replaceChildren(key);
+    else issue.replaceChildren(issue.ownerDocument.createTextNode(issue.getAttribute('data-jira-key') || ''));
+  }
 }
 
 function convertCheckboxes(root: Element): void {
@@ -277,6 +359,8 @@ export function contentIdFromUrl(url: URL, site: SiteInfo): string | null {
   }
   const tiny = /^\/x\/([A-Za-z0-9_-]+)\/?$/.exec(path);
   if (tiny?.[1]) return decodeTiny(tiny[1]);
+  const code = url.searchParams.get('urlIdentifier');
+  if (/\/pages\/tinyurl\.action$/i.test(path) && code && /^[A-Za-z0-9_-]+$/.test(code)) return decodeTiny(code);
   return null;
 }
 
@@ -324,7 +408,8 @@ function rewriteLinks(root: Element, ctx: SanitizeContext, prefix: string): void
       continue;
     }
     if (url.protocol === 'http:' || url.protocol === 'https:') {
-      const targetId = url.origin === ctx.site.origin ? (linkedResourceId(a) ?? contentIdFromUrl(url, ctx.site)) : null;
+      const targetId =
+        url.origin === ctx.site.origin ? (linkedResourceId(a) ?? contentIdFromUrl(url, ctx.site) ?? indexedId(url, ctx)) : null;
       if (targetId && (targetId === ctx.pageId || ctx.exportedIds.has(targetId))) {
         const frag = url.hash ? safeDecode(url.hash.slice(1)) : '';
         if (frag) {
@@ -387,13 +472,18 @@ function promoteHeaderRows(root: Element): void {
     if (children.some((c) => c.tagName === 'THEAD')) continue;
     const tbody = children.find((c) => c.tagName === 'TBODY');
     if (!tbody) continue;
-    const rows = Array.from(tbody.children).filter((r) => r.tagName === 'TR');
+    const all = Array.from(tbody.children).filter((r) => r.tagName === 'TR');
+    // DC's Jira table starts with an empty `<tr></tr>` before its header row.
+    const start = all.findIndex((r) => r.children.length > 0);
+    if (start < 0) continue;
+    const rows = all.slice(start);
     const first = rows[0];
     if (!first || rows.length < 2) continue;
     const cells = Array.from(first.children).filter((c) => c.tagName === 'TD' || c.tagName === 'TH');
     if (cells.length === 0 || !cells.every((c) => c.tagName === 'TH')) continue;
     // Row spans reaching into the body would break if the row moved to <thead>.
     if (cells.some((c) => Number(c.getAttribute('rowspan') || '1') > 1)) continue;
+    for (const empty of all.slice(0, start)) empty.remove();
     const thead = doc.createElement('thead');
     thead.appendChild(first);
     table.insertBefore(thead, tbody);
@@ -406,6 +496,10 @@ function promoteHeaderRows(root: Element): void {
  */
 function stripActiveContent(root: Element): void {
   for (const el of Array.from(root.querySelectorAll(CONTROL_SELECTOR))) el.remove();
+  // A fieldset that only held (now removed) controls would print as an empty bordered box.
+  for (const fs of Array.from(root.querySelectorAll('fieldset')).reverse()) {
+    if (!(fs.textContent || '').trim() && !fs.querySelector('img, svg, table, canvas, picture, pre, hr')) fs.remove();
+  }
   for (const form of Array.from(root.querySelectorAll('form'))) unwrap(form);
   for (const el of Array.from(root.querySelectorAll('*'))) {
     for (const attr of Array.from(el.attributes)) {

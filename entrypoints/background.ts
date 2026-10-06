@@ -30,7 +30,7 @@ const UI_TYPES = new Set<string>([
   'preview/open',
 ]);
 const WORKER_EVENTS = new Set<string>(['worker/progress', 'worker/throttled', 'worker/done', 'worker/ready']);
-const CONTENT_TYPES = new Set<string>(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed']);
+const CONTENT_TYPES = new Set<string>(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed', 'slides']);
 
 function t(key: string, fallback: string): string {
   try {

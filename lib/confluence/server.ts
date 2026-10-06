@@ -129,8 +129,12 @@ export function titleQuery(spaceKey: string, title: string, lookup?: TitleLookup
 
 /** Concurrent requests used while walking a tree. */
 const TREE_CONCURRENCY = 4;
-/** `space` gives every child its space key, so listing children needs no extra lookup. */
-const CHILD_EXPAND = 'extensions.position,childTypes.page,space';
+/**
+ * Children inherit the parent's space key (expanding `space` on every child doubled the payload).
+ * `childTypes.page` tells whether a child has children of its own on versions that support it
+ * (DC 9 ignores it, so `hasChildren` stays unknown there).
+ */
+const CHILD_EXPAND = 'extensions.position,childTypes.page';
 
 export class ServerClient implements ConfluenceClient {
   readonly site: SiteInfo;
@@ -198,11 +202,17 @@ export class ServerClient implements ConfluenceClient {
   async getChildren(parent: { id: string; type: ContentType }): Promise<ContentSummary[]> {
     // Only pages have child pages on DC/Server (no folders, whiteboards, ...).
     if (parent.type !== 'page') return [];
-    const items = await this.list<V1Content>(
-      `/content/${encodeURIComponent(parent.id)}/child/page${qs({ expand: CHILD_EXPAND, limit: 200 })}`,
-    );
+    const [items, info] = await Promise.all([
+      this.list<V1Content>(`/content/${encodeURIComponent(parent.id)}/child/page${qs({ expand: CHILD_EXPAND, limit: 200 })}`),
+      // Usually cached already (the root was read by the collector, deeper parents were seeded).
+      this.getContent(parent.id).catch((e: unknown) => {
+        if (isAbortError(e)) throw e;
+        return null;
+      }),
+    ]);
+    const space = { spaceKey: info?.spaceKey, spaceId: info?.spaceId };
     const children = items
-      .map((raw) => v1Summary(raw, this.site, { parentId: parent.id, parentType: 'page' }))
+      .map((raw) => v1Summary(raw, this.site, { parentId: parent.id, parentType: 'page', ...space }))
       .map((s) => ({ ...s, parentId: parent.id, parentType: 'page' as const }))
       .sort(compareSiblings);
     for (const c of children) this.seed(c);

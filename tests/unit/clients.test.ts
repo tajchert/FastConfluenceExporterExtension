@@ -3,6 +3,7 @@ import { CloudClient } from '../../lib/confluence/cloud';
 import { buildTreeOrder, createClient, type ContentSummary } from '../../lib/confluence/client';
 import { ServerClient } from '../../lib/confluence/server';
 import type { SiteInfo } from '../../lib/types';
+import { CLOUD_DIRECT_CHILD, CLOUD_USER_PROFILE_FORBIDDEN, cqlNonPageHits } from './fixtures/publicSites';
 
 const cloud: SiteInfo = {
   origin: 'https://acme.atlassian.net',
@@ -315,6 +316,43 @@ describe('CloudClient', () => {
     });
   });
 
+  it('anonymous: a 403 on user profiles stops further author lookups', async () => {
+    const seen = route((u) => {
+      const m = u.pathname.match(/^\/wiki\/api\/v2\/pages\/(\d+)$/);
+      if (m) return { body: { id: m[1], title: `P${m[1]}`, spaceId: '7', version: { number: 1, authorId: `acct-${m[1]}` }, body: { export_view: { value: '<p/>' } } } };
+      if (u.pathname === '/wiki/api/v2/spaces/7') return { body: { id: '7', key: 'AI' } };
+      if (u.pathname === '/wiki/rest/api/user') return { status: 403, body: CLOUD_USER_PROFILE_FORBIDDEN };
+      return undefined;
+    });
+    const c = new CloudClient(cloud);
+    await expect(c.getPageBody('1', 'page', { breadcrumb: [] })).resolves.toMatchObject({ authorDisplayName: undefined, spaceKey: 'AI' });
+    await c.getPageBody('2', 'page', { breadcrumb: [] });
+    await c.getPageBody('3', 'page', { breadcrumb: [] });
+    expect(seen.filter((s) => s.startsWith('/wiki/rest/api/user'))).toHaveLength(1);
+  });
+
+  it('getSpaceRoots also lists non-page content at the space root (CQL), and keeps slides in the tree', async () => {
+    route((u) => {
+      if (u.pathname === '/wiki/api/v2/spaces') return { body: { results: [{ id: '77', key: 'AI', name: 'AI', homepageId: '20' }] } };
+      if (u.pathname === '/wiki/api/v2/spaces/77/pages') return { body: { results: [{ id: '20', title: 'Home', spaceId: '77', position: 5 }] } };
+      if (u.pathname === '/wiki/rest/api/search') {
+        expect(u.searchParams.get('cql')).toBe('space = "AI" and type in (folder, whiteboard, database, embed)');
+        expect(u.searchParams.get('expand')).toBe('content.ancestors');
+        return { body: cqlNonPageHits('900') };
+      }
+      if (u.pathname === '/wiki/api/v2/folders/900') return { body: { id: '900', type: 'folder', title: 'Archive', spaceId: '77', parentId: null, position: 1 } };
+      if (u.pathname === '/wiki/api/v2/pages/20/direct-children')
+        return { body: { results: [CLOUD_DIRECT_CHILD, { id: '31', status: 'current', title: 'Deck', type: 'slides', childPosition: 5 }] } };
+      if (u.pathname === '/wiki/api/v2/pages/20') return { body: { id: '20', title: 'Home', spaceId: '77' } };
+      return undefined;
+    });
+    const c = new CloudClient(cloud);
+    const roots = await c.getSpaceRoots({ key: 'AI' });
+    expect(roots.map((r) => `${r.id}:${r.type}`)).toEqual(['20:page', '900:folder']);
+    const kids = await c.getChildren({ id: '20', type: 'page' });
+    expect(kids.map((k) => `${k.id}:${k.type}`)).toEqual(['31:slides', '29156212770:folder']);
+  });
+
   it('discovers an untyped id without asking the v2 blog post endpoint', async () => {
     const seen = route((u) => {
       if (u.pathname === '/wiki/rest/api/content/12') return { body: { id: '12', type: 'blogpost', title: 'News', space: { key: 'ENG' } } };
@@ -428,6 +466,19 @@ describe('ServerClient', () => {
     await expect(c.getContent('3')).resolves.toMatchObject({ title: 'Three', parentId: '1', spaceKey: 'OPS' });
     await expect(c.getContent('1')).resolves.toMatchObject({ title: 'Root', parentId: undefined });
     expect(seen).toHaveLength(1);
+  });
+
+  it('children inherit the parent space instead of expanding it on every child', async () => {
+    const seen = route((u) => {
+      if (u.pathname === '/confluence/rest/api/content/1') return { body: { id: 1, type: 'page', title: 'Root', space: { key: 'COC', id: 5 }, ancestors: [] } };
+      if (u.pathname === '/confluence/rest/api/content/1/child/page')
+        return { body: { results: [{ id: 2, type: 'page', title: 'Denver 2024', extensions: { position: 'none' } }], start: 0, limit: 200, size: 1 } };
+      return undefined;
+    });
+    const kids = await new ServerClient(dc).getChildren({ id: '1', type: 'page' });
+    expect(kids[0]).toMatchObject({ id: '2', spaceKey: 'COC', spaceId: '5', parentId: '1' });
+    const listing = seen.find((s) => s.includes('/child/page'))!;
+    expect(new URL(listing, 'https://x').searchParams.get('expand')).toBe('extensions.position,childTypes.page');
   });
 
   it('looks up blog posts by title and posting day', async () => {

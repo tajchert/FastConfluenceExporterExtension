@@ -12,7 +12,7 @@ import type { ExportJobState, ExportRequest } from '../../lib/types';
 import { encodeRequestParam } from '../../lib/util/base64';
 import { cloudSite, dcSite, expect, options, test, type ExtensionHarness } from './fixtures';
 import type { MockConfluence } from './mock-confluence/server.mjs';
-import { links, loadPdf, namedDestinations, readOutline, type Outline } from './pdf';
+import { links, loadPdf, namedDestinations, pageTree, readOutline, type Outline, type PageTree } from './pdf';
 
 const TITLES: Record<string, string> = {
   100: 'Test Home',
@@ -48,25 +48,12 @@ function expectReadOnlyWithCookies(mock: MockConfluence) {
   expect(api.filter((r) => !r.cookie)).toEqual([]);
 }
 
-async function exportAndRead(ext: ExtensionHarness, request: ExportRequest, pages?: ExportJobState['pages']) {
-  const jobId = await ext.startJob(request, pages);
-  const job = await ext.waitForJob(jobId);
-  expect(job.status, `${job.message} ${JSON.stringify(job.errors)}`).toBe('done');
-  expect(job.result?.downloadId).toBeDefined();
-  const file = await ext.download(job.result!.downloadId!);
-  return { job, file };
+function exportAndRead(ext: ExtensionHarness, request: ExportRequest, pages?: ExportJobState['pages']) {
+  return ext.exportAndDownload(request, pages);
 }
 
 const outlineTitles = (o: { title: string }[]) => o.map((i) => i.title);
 
-type PageTree = [string, PageTree[]];
-/** The page bookmarks of an outline (heading bookmarks of each page left out), nested. */
-function pageTree(items: Outline[], titles: Iterable<string>): PageTree[] {
-  const set = new Set(titles);
-  const walk = (list: Outline[]): PageTree[] =>
-    list.flatMap((it): PageTree[] => (set.has(it.title) ? [[it.title, walk(it.children)]] : walk(it.children)));
-  return walk(items);
-}
 const flatTitles = (items: Outline[]): string[] => items.flatMap((i) => [i.title, ...flatTitles(i.children)]);
 
 test('(a) current page → one PDF: metadata, outline, anchors, images, read-only same-origin traffic', async ({ ext, cloud }) => {
@@ -567,6 +554,29 @@ test('(p) session expires mid-export → clear sign-in error, no file', async ({
   // Not reported as a pile of per-page "no permission" errors.
   expect(job.errors.filter((e) => /permission/i.test(e.message))).toEqual([]);
   await expect.poll(() => ext.workerTabUrls(), { timeout: 3000 }).toEqual([]);
+});
+
+test('(s) public site, not signed in: anonymous export works, a network failure skips one page instead of failing', async ({ ext, cloud }) => {
+  await ext.context.clearCookies();
+  cloud.config.publicAccess = true;
+  // "Getting Started": every attempt of its body request fails at the network level (Chrome
+  // itself retries a reset connection, so drop more than our own two attempts).
+  cloud.config.dropPath = '/wiki/api/v2/pages/102?body-format=export_view';
+  cloud.config.dropCount = 20;
+  const { job, file } = await exportAndRead(
+    ext,
+    cloudRequest(cloud, { mode: 'subtree', depth: 'all', userDisplayName: undefined, root: { id: '101', type: 'page', title: TITLES[101] } }),
+  );
+  // 102 failed (network), 104 is not public: both skipped, the export finished.
+  expect(job.errors.map((e) => e.pageId).sort()).toEqual(['102', '104']);
+  expect(job.errors.find((e) => e.pageId === '104')?.message).toMatch(/isn't public/);
+  expect(job.message).not.toMatch(/log in|sign in/i);
+  const pdf = await loadPdf(file.bytes);
+  expect(pdf.getAuthor()).toBeUndefined();
+  // "Local Setup" takes the place of its skipped parent "Getting Started".
+  expect(pageTree(readOutline(pdf), Object.values(TITLES))).toEqual([['Engineering Handbook', [['Local Setup', []], ['Architecture Overview', []]]]]);
+  // Nothing was sent with a session cookie: this really was anonymous.
+  expect(cloud.log.filter((r) => /\/(rest\/api|api\/v2)\//.test(r.path) && r.cookie)).toEqual([]);
 });
 
 test('(r) preview: collecting can be cancelled, and closing the preview closes its helper tab', async ({ ext, cloud }) => {

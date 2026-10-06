@@ -13,7 +13,7 @@ import type {
 import type { PageBody } from '../confluence/client';
 import printCss from './print.css?inline';
 import { effectiveMarginsMm, paperSizeMm } from './geometry';
-import { sanitizePageHtml } from './sanitize';
+import { buildPageIndex, sanitizePageHtml, type PageIndex } from './sanitize';
 
 export interface AssembleInput {
   pages: { ref: PageRef; body?: PageBody; info?: FetchedPageInfo; live?: boolean }[]; // in order
@@ -120,9 +120,10 @@ const TYPE_LABELS: Record<ContentType, string> = {
   whiteboard: 'Whiteboard',
   database: 'Database',
   embed: 'Smart link',
+  slides: 'Slides',
 };
 
-const LINK_ONLY_TYPES = new Set<ContentType>(['folder', 'whiteboard', 'database', 'embed']);
+const LINK_ONLY_TYPES = new Set<ContentType>(['folder', 'whiteboard', 'database', 'embed', 'slides']);
 
 function hostOf(url: string | undefined): string | undefined {
   try {
@@ -256,7 +257,7 @@ function buildHeader(
   const updated = formatDate(body?.lastModified ?? info?.lastModified);
   if (updated) items.push(el(doc, 'span', {}, `Last updated ${updated}`));
   const author = body?.authorDisplayName ?? info?.authorDisplayName;
-  if (author) items.push(el(doc, 'span', {}, `by ${author}`));
+  if (author) items.push(el(doc, 'span', { class: 'cf-author' }, `by ${author}`));
   const version = body?.version ?? info?.version;
   if (version) items.push(el(doc, 'span', {}, `Version ${version}`));
   const url = safeHttpUrl(body?.url || ref.url);
@@ -270,6 +271,7 @@ function buildArticle(
   entry: AssembleInput['pages'][number],
   input: AssembleInput,
   exportedIds: Set<string>,
+  pageIndex: PageIndex,
 ): HTMLElement {
   const { ref, body, info } = entry;
   const linkOnly = LINK_ONLY_TYPES.has(ref.type) || !!info?.linkOnly;
@@ -335,6 +337,7 @@ function buildArticle(
           site: input.site,
           pageUrl: url ?? input.site.baseUrl,
           exportedIds,
+          pageIndex,
           includeComments: input.options.includeComments,
         }),
       );
@@ -361,10 +364,41 @@ function errorMessage(err: unknown): string {
 
 // ───────────────────────────── post-layout passes ────────────────────────────────────────────
 
+/** Heading-id comparison key: case, hyphens, underscores and spaces ignored. */
+function looseId(s: string): string {
+  return s.toLowerCase().replace(/[-_\s]+/g, '');
+}
+
+/**
+ * Cloud links to another page's heading use editor-style fragments (`#Included-Models`) while
+ * export_view ids look like `PageTitle-IncludedModels`. Finds the heading id of page `pageId` that
+ * ends with the fragment when hyphens and spaces are ignored (shortest such id wins).
+ */
+function looseHeadingTarget(byPage: Map<string, string[]>, pageId: string, frag: string): string | null {
+  const want = looseId(frag);
+  if (want.length < 3) return null;
+  let best: string | null = null;
+  for (const id of byPage.get(pageId) ?? []) {
+    const rest = looseId(id.slice(`p${pageId}-`.length));
+    if ((rest === want || rest.endsWith(want)) && (!best || id.length < best.length)) best = id;
+  }
+  return best;
+}
+
 /** Points in-document anchors whose target is missing at their page (or drops the link). */
 function fixDanglingAnchors(doc: Document, documentPageIds: Set<string>): void {
   const ids = new Set<string>();
-  for (const node of Array.from(doc.querySelectorAll('[id]'))) ids.add(node.id);
+  /** page id → its prefixed content ids (`p{id}-…`) */
+  const byPage = new Map<string, string[]>();
+  for (const node of Array.from(doc.querySelectorAll('[id]'))) {
+    ids.add(node.id);
+    const m = /^p(\d+)-/.exec(node.id);
+    if (m) {
+      let list = byPage.get(m[1]!);
+      if (!list) byPage.set(m[1]!, (list = []));
+      list.push(node.id);
+    }
+  }
   for (const a of Array.from(doc.querySelectorAll('a[href^="#"]'))) {
     const href = a.getAttribute('href') || '';
     const fallback = a.getAttribute('data-cf-fallback');
@@ -379,6 +413,12 @@ function fixDanglingAnchors(doc: Document, documentPageIds: Set<string>): void {
     if (ids.has(raw) || ids.has(decoded)) continue;
     // Page-level anchors may target a page printed in another batch: leave them alone.
     if (/^p-[^-]/.test(raw) && documentPageIds.has(raw.slice(2))) continue;
+    const heading = /^p(\d+)-(.+)$/.exec(decoded);
+    const loose = heading ? looseHeadingTarget(byPage, heading[1]!, heading[2]!) : null;
+    if (loose) {
+      a.setAttribute('href', `#${loose}`);
+      continue;
+    }
     if (fallback) {
       const fid = fallback.slice(1);
       if (ids.has(fid) || documentPageIds.has(fid.replace(/^p-/, ''))) {
@@ -525,6 +565,10 @@ export function buildPrintDocument(doc: Document, input: AssembleInput): void {
   const documentPageIds = new Set(inDocument.map((p) => p.id));
   for (const p of input.pages) if (!excluded.has(p.ref.id)) documentPageIds.add(p.ref.id);
   const exportedIds = new Set(documentPageIds);
+  const pageIndex = buildPageIndex(
+    [...input.pages.map((p) => ({ ...p.ref, url: p.body?.url ?? p.ref.url })), ...input.allPages].filter((p) => documentPageIds.has(p.id)),
+    input.site,
+  );
 
   const firstTitle = input.pages[0]?.body?.title || input.pages[0]?.ref.title;
   const title = input.cover?.title || firstTitle || 'Confluence export';
@@ -556,7 +600,7 @@ export function buildPrintDocument(doc: Document, input: AssembleInput): void {
     if (seen.has(entry.ref.id) || excluded.has(entry.ref.id)) continue;
     seen.add(entry.ref.id);
     try {
-      main.append(buildArticle(doc, entry, input, exportedIds));
+      main.append(buildArticle(doc, entry, input, exportedIds, pageIndex));
     } catch (err) {
       // One broken page must never break the whole export.
       const article = el(doc, 'article', { class: 'cf-page', id: `p-${entry.ref.id}`, 'data-page-id': entry.ref.id });

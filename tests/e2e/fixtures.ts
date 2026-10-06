@@ -92,6 +92,16 @@ export class ExtensionHarness {
     }
   }
 
+  /** Runs an export to the end and reads the downloaded file; fails unless the job is `done`. */
+  async exportAndDownload(request: ExportRequest, pages?: PageRef[], timeoutMs?: number): Promise<{ job: ExportJobState; file: DownloadInfo }> {
+    const jobId = await this.startJob(request, pages);
+    const job = await this.waitForJob(jobId, undefined, timeoutMs);
+    if (job.status !== 'done' || job.result?.downloadId === undefined) {
+      throw new Error(`Export ended as "${job.status}": ${job.message} ${JSON.stringify(job.errors)}`);
+    }
+    return { job, file: await this.download(job.result.downloadId) };
+  }
+
   /** Opens a Confluence page in a normal tab (this also sets the mock's session cookie). */
   async openPage(url: string): Promise<Page> {
     const page = await this.context.newPage();
@@ -102,7 +112,7 @@ export class ExtensionHarness {
   /** Tabs the extension opened on a Confluence JSON endpoint (worker tabs). */
   async workerTabUrls(): Promise<string[]> {
     const tabs = (await this.driver.evaluate(() => chrome.tabs.query({}))) as chrome.tabs.Tab[];
-    return tabs.map((t) => t.url ?? t.pendingUrl ?? '').filter((u) => /\/rest\/api\/space\?limit=1/.test(u));
+    return tabs.map((t) => t.url ?? t.pendingUrl ?? '').filter((u) => /\/(rest\/api\/space|api\/v2\/spaces)\?limit=1/.test(u));
   }
 
   /** Tab ids the extension still holds a chrome.debugger session on. */
@@ -144,9 +154,17 @@ export function options(overrides: Partial<ExportOptions> = {}): ExportOptions {
   return { ...DEFAULT_OPTIONS, marginsMm: { ...DEFAULT_OPTIONS.marginsMm }, ...overrides };
 }
 
-async function launch(downloadsDir: string): Promise<ExtensionHarness> {
-  if (!fs.existsSync(path.join(EXTENSION_DIR, 'manifest.json'))) {
-    throw new Error(`Build the extension first: npm run build:e2e (missing ${EXTENSION_DIR})`);
+/**
+ * Loads an unpacked build into a persistent Chromium profile whose downloads go to `downloadsDir`.
+ * Shared with the live suite (tests/live), which loads `.output/chrome-mv3-live`.
+ */
+export async function launchExtension(
+  downloadsDir: string,
+  extensionDir = EXTENSION_DIR,
+  buildCommand = 'npm run build:e2e',
+): Promise<ExtensionHarness> {
+  if (!fs.existsSync(path.join(extensionDir, 'manifest.json'))) {
+    throw new Error(`Build the extension first: ${buildCommand} (missing ${extensionDir})`);
   }
   const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfp-e2e-profile-'));
   // Chrome's own download preferences: straight to `downloadsDir`, never ask.
@@ -163,7 +181,7 @@ async function launch(downloadsDir: string): Promise<ExtensionHarness> {
     acceptDownloads: true,
     downloadsPath: downloadsDir,
     viewport: { width: 1280, height: 900 },
-    args: [`--disable-extensions-except=${EXTENSION_DIR}`, `--load-extension=${EXTENSION_DIR}`],
+    args: [`--disable-extensions-except=${extensionDir}`, `--load-extension=${extensionDir}`],
   });
   let [sw] = context.serviceWorkers();
   sw ??= await context.waitForEvent('serviceworker', { timeout: 15_000 });
@@ -209,7 +227,7 @@ export const test = base.extend<
   ],
   ext: [
     async ({ downloadsDir }, use) => {
-      const ext = await launch(downloadsDir);
+      const ext = await launchExtension(downloadsDir);
       await use(ext);
       await ext.context.close();
     },

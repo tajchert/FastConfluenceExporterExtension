@@ -22,7 +22,8 @@ export interface SiteInfo {
   siteTitle?: string;
 }
 
-export type ContentType = 'page' | 'blogpost' | 'folder' | 'whiteboard' | 'database' | 'embed';
+/** `slides` (Cloud presentations) is link-only like whiteboards, databases and embeds. */
+export type ContentType = 'page' | 'blogpost' | 'folder' | 'whiteboard' | 'database' | 'embed' | 'slides';
 
 /** What the active tab is showing. Produced by the popup's probe (lib/confluence/detect.ts). */
 export interface PageContext {

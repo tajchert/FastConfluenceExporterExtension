@@ -46,7 +46,7 @@ const BADGE_COLOR = '#0C66E4';
 const NOTIFICATION_PREFIX = 'cfp-job:';
 const TERMINAL: ReadonlySet<JobStatus> = new Set(['done', 'error', 'cancelled']);
 const MODES: ReadonlySet<ExportMode> = new Set(['current', 'subtree', 'folder', 'linked', 'selection', 'space']);
-const CONTENT_TYPES: ReadonlySet<ContentType> = new Set(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed']);
+const CONTENT_TYPES: ReadonlySet<ContentType> = new Set(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed', 'slides']);
 
 interface RunningJob {
   job: ExportJobState;

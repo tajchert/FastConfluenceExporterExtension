@@ -186,11 +186,12 @@ export const TYPE_LABEL: Record<ContentType, string> = {
   whiteboard: 'Whiteboard',
   database: 'Database',
   embed: 'Smart link',
+  slides: 'Slides',
 };
 
 /** Types exported as a TOC entry with a link only (no content body). */
 export function isLinkOnlyType(t: ContentType): boolean {
-  return t === 'whiteboard' || t === 'database' || t === 'embed';
+  return t === 'whiteboard' || t === 'database' || t === 'embed' || t === 'slides';
 }
 
 // ───────────────────────────── FR-16 large export guard ─────────────────────────────

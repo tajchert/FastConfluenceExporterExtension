@@ -274,14 +274,23 @@ function abortError(): DOMException {
 }
 
 /**
- * Opens the worker tab for a site: `{base}/rest/api/space?limit=1` (same-origin JSON, no app
- * scripts, no CSP), waits for it, checks the user is logged in, injects /worker.js and pings it.
+ * Same-origin JSON endpoint the worker tab is opened on (no app scripts, no CSP, works for
+ * anonymous visitors of public sites). Cloud: REST v2 (v1 is deprecated there); DC/Server: v1.
+ */
+export function workerTabUrl(site: SiteInfo): string {
+  const base = site.baseUrl.replace(/\/+$/, '');
+  return site.flavour === 'cloud' ? `${base}/api/v2/spaces?limit=1` : `${base}/rest/api/space?limit=1`;
+}
+
+/**
+ * Opens the worker tab for a site on `workerTabUrl(site)`, waits for it, checks it did not land
+ * on a login page, injects /worker.js and pings it.
  * When `signal` aborts (the user cancelled while the tab was still opening), the tab is closed
  * and the promise rejects with an AbortError.
  */
 export async function openWorkerTab(site: SiteInfo, nearTabId?: number, signal?: AbortSignal): Promise<number> {
   if (signal?.aborted) throw abortError();
-  const tabId = await openBackgroundTab(markUrl(`${site.baseUrl}/rest/api/space?limit=1`, WORKER_TAB_MARKER), nearTabId);
+  const tabId = await openBackgroundTab(markUrl(workerTabUrl(site), WORKER_TAB_MARKER), nearTabId);
   const check = () => {
     if (signal?.aborted) throw abortError();
   };
