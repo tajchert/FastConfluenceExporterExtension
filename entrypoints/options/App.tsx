@@ -9,7 +9,7 @@ import { NumberField } from '../../components/NumberField';
 import { OptionsForm } from '../../components/OptionsForm';
 import { Toggle } from '../../components/Toggle';
 import { listGrantedOrigins, removeSiteAccess, requestSiteAccess } from '../../lib/permissions';
-import { loadPolicy, loadSettings, loadUserSettings, onSettingsChanged, saveSettings } from '../../lib/settings';
+import { MAX_PRINT_BATCH_SIZE, loadPolicy, loadSettings, loadUserSettings, onSettingsChanged, saveSettings } from '../../lib/settings';
 import { DEFAULT_SETTINGS, type ExportOptions, type ManagedPolicy, type Settings } from '../../lib/types';
 
 const COMMAND_NAME = 'export-current-page';
@@ -225,8 +225,8 @@ export function App(): JSX.Element {
                 label="Pages per print batch"
                 value={form.printBatchSize}
                 min={10}
-                max={1000}
-                hint="Splits very large exports to limit memory"
+                max={MAX_PRINT_BATCH_SIZE}
+                hint={`Splits very large exports to limit memory (10–${MAX_PRINT_BATCH_SIZE})`}
                 onChange={(v) => set('printBatchSize', v)}
               />
               <NumberField
@@ -359,6 +359,9 @@ function SiteAccess(): JSX.Element {
     }
     const { origin } = parsed;
     setAdding(true);
+    // A popup export waiting for access to this site (its prompt was denied or dismissed) must
+    // not start because of this grant. Fire-and-forget keeps the user gesture.
+    chrome.storage.session.remove('pendingStart').catch(() => undefined);
     // No awaits before this call: it must run within the click's user gesture.
     requestSiteAccess(origin)
       .then((granted) => {
@@ -465,8 +468,14 @@ function About(): JSX.Element {
       </h2>
       <p>Version {version}</p>
       <p>
-        <Icon name="shield" size={14} /> Runs entirely in your browser. No data is sent anywhere except your Confluence
-        site. The extension only reads from Confluence and never changes anything there.
+        <Icon name="shield" size={14} /> Runs entirely in your browser. The extension reads only from your Confluence
+        site and never changes anything there; images embedded in your pages load from wherever they are hosted, as when
+        you view the page.
+      </p>
+      <p>
+        <a href={chrome.runtime.getURL('/THIRD_PARTY_LICENSES.txt')} target="_blank" rel="noreferrer">
+          Third-party licenses
+        </a>
       </p>
       <p>
         <Icon name="keyboard" size={14} /> Keyboard shortcut for exporting the current page:{' '}

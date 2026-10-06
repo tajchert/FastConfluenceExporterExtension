@@ -8,13 +8,22 @@ import type { SiteInfo } from '../types';
 import { callWorker } from '../rpc';
 
 const ORPHAN_KEY = 'orphanTabs';
+/**
+ * URL fragments that mark tabs opened by the extension (they do not change the request). The
+ * orphan list lives in session storage, which a browser restart clears, while "Continue where
+ * you left off" restores the tabs with new ids: the marker still identifies them.
+ */
+export const WORKER_TAB_MARKER = '#cfp-worker';
+export const LIVE_TAB_MARKER = '#cfp-live';
 const LOAD_TIMEOUT_MS = 30_000;
 const PING_ATTEMPTS = 20;
 const PING_INTERVAL_MS = 150;
 /** Fallback polling of the tab status while waiting for "complete" (see waitForTabComplete). */
 const STATUS_POLL_MS = 250;
 
-export const LOGIN_REQUIRED_MESSAGE = 'Please log in to Confluence in this browser, then try again.';
+import { LOGIN_REQUIRED_MESSAGE } from '../errors';
+
+export { LOGIN_REQUIRED_MESSAGE };
 
 export class LoginRequiredError extends Error {
   readonly code = 'LOGIN_REQUIRED';
@@ -60,15 +69,37 @@ export function unregisterOrphan(tabId: number): Promise<void> {
   return withOrphanList((ids) => ids.filter((id) => id !== tabId));
 }
 
-/** Closes tabs left behind by a previous service-worker instance. Returns how many were closed. */
+/** Adds `marker` as the URL fragment (replacing any fragment the URL had). */
+export function markUrl(url: string, marker: string): string {
+  const hash = url.indexOf('#');
+  return (hash >= 0 ? url.slice(0, hash) : url) + marker;
+}
+
+function isMarked(url: string | undefined): boolean {
+  return !!url && (url.endsWith(WORKER_TAB_MARKER) || url.endsWith(LIVE_TAB_MARKER));
+}
+
+/**
+ * Closes tabs left behind by a previous service-worker instance (or restored after a browser
+ * restart or crash). Only tabs on granted sites expose their URL, which is exactly where the
+ * extension opens its helper tabs. Returns how many were closed.
+ */
 export async function closeOrphanTabs(): Promise<number> {
   let ids: number[] = [];
   await withOrphanList((list) => {
     ids = list;
     return [];
   });
+  const targets = new Set(ids);
+  try {
+    for (const tab of await chrome.tabs.query({})) {
+      if (tab.id !== undefined && (isMarked(tab.url) || isMarked(tab.pendingUrl))) targets.add(tab.id);
+    }
+  } catch {
+    /* tabs API unavailable */
+  }
   let closed = 0;
-  for (const id of ids) {
+  for (const id of targets) {
     try {
       await chrome.tabs.remove(id);
       closed++;
@@ -142,7 +173,7 @@ export function waitForTabComplete(tabId: number, timeoutMs = LOAD_TIMEOUT_MS, s
       if (id === tabId && info.status === 'complete') finish(() => resolve(tab));
     };
     const onRemoved = (id: number) => {
-      if (id === tabId) finish(() => reject(new Error('The export tab was closed.')));
+      if (id === tabId) finish(() => reject(new Error('An export helper tab was closed, so the export stopped.')));
     };
     const onAbort = () => finish(() => reject(new DOMException('The export was cancelled.', 'AbortError')));
     const timer = setTimeout(
@@ -158,7 +189,7 @@ export function waitForTabComplete(tabId: number, timeoutMs = LOAD_TIMEOUT_MS, s
         (tab) => {
           if (tab.status === 'complete') finish(() => resolve(tab));
         },
-        () => finish(() => reject(new Error('The export tab was closed.'))),
+        () => finish(() => reject(new Error('An export helper tab was closed, so the export stopped.'))),
       );
     const poll = setInterval(() => void checkNow(), STATUS_POLL_MS);
     if (signal?.aborted) return onAbort();
@@ -175,7 +206,7 @@ export function scriptingError(e: unknown, origin: string): Error {
   if (/cannot access|permission|host/i.test(msg)) {
     return new Error(`The extension has no access to ${origin}. Grant site access from the extension popup and try again.`);
   }
-  if (/no tab with id|tab was closed/i.test(msg)) return new Error('The export tab was closed.');
+  if (/no tab with id|tab was closed|helper tab was closed/i.test(msg)) return new Error('An export helper tab was closed, so the export stopped.');
   return new Error(msg);
 }
 
@@ -238,14 +269,25 @@ async function injectWorker(tabId: number, site: SiteInfo): Promise<void> {
   }
 }
 
+function abortError(): DOMException {
+  return new DOMException('The export was cancelled.', 'AbortError');
+}
+
 /**
  * Opens the worker tab for a site: `{base}/rest/api/space?limit=1` (same-origin JSON, no app
  * scripts, no CSP), waits for it, checks the user is logged in, injects /worker.js and pings it.
+ * When `signal` aborts (the user cancelled while the tab was still opening), the tab is closed
+ * and the promise rejects with an AbortError.
  */
-export async function openWorkerTab(site: SiteInfo, nearTabId?: number): Promise<number> {
-  const tabId = await openBackgroundTab(`${site.baseUrl}/rest/api/space?limit=1`, nearTabId);
+export async function openWorkerTab(site: SiteInfo, nearTabId?: number, signal?: AbortSignal): Promise<number> {
+  if (signal?.aborted) throw abortError();
+  const tabId = await openBackgroundTab(markUrl(`${site.baseUrl}/rest/api/space?limit=1`, WORKER_TAB_MARKER), nearTabId);
+  const check = () => {
+    if (signal?.aborted) throw abortError();
+  };
   try {
-    await waitForTabComplete(tabId, LOAD_TIMEOUT_MS);
+    await waitForTabComplete(tabId, LOAD_TIMEOUT_MS, signal);
+    check();
     let info: WorkerDocInfo | undefined;
     try {
       const [res] = await chrome.scripting.executeScript({ target: { tabId }, func: inspectWorkerDocument });
@@ -259,8 +301,10 @@ export async function openWorkerTab(site: SiteInfo, nearTabId?: number): Promise
       }
       throw scriptingError(e, site.origin);
     }
+    check();
     if (info && looksLikeLogin(info, site)) throw new LoginRequiredError();
     await injectWorker(tabId, site);
+    check();
     workerSites.set(tabId, site);
     return tabId;
   } catch (e) {
@@ -284,7 +328,7 @@ export async function ensureWorker(tabId: number): Promise<void> {
   try {
     tab = await chrome.tabs.get(tabId);
   } catch {
-    throw new Error('The export tab was closed.');
+    throw new Error('An export helper tab was closed, so the export stopped.');
   }
   if (tab.status !== 'complete') await waitForTabComplete(tabId, LOAD_TIMEOUT_MS);
   const site = workerSites.get(tabId);

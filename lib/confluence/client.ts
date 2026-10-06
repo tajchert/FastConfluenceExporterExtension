@@ -48,6 +48,27 @@ export interface SpaceSummary {
   homepageId?: string;
 }
 
+export interface DescendantsOptions {
+  /**
+   * Called for a branch below the root that could not be listed (429 after retries, 5xx, network).
+   * That branch is skipped and the walk continues; failures of the root itself still reject.
+   */
+  onWarning?: (message: string) => void;
+}
+
+/** What the caller already knows about a page, so the client can skip lookups. */
+export interface KnownPageInfo {
+  /** Ancestor titles (space root first). Skips the breadcrumb lookups on Cloud. */
+  breadcrumb?: string[];
+}
+
+export interface TitleLookup {
+  /** 'page' (default) or 'blogpost'. */
+  type?: 'page' | 'blogpost';
+  /** Blog posts: posting day `YYYY-MM-DD` (from DC `/display/KEY/YYYY/MM/DD/Title` URLs). */
+  postingDay?: string;
+}
+
 export interface ConfluenceClient {
   readonly site: SiteInfo;
   /** Metadata for one piece of content. Without `type`, the type is discovered. */
@@ -55,13 +76,18 @@ export interface ConfluenceClient {
   /** Direct children in sidebar order. */
   getChildren(parent: { id: string; type: ContentType }): Promise<ContentSummary[]>;
   /** All descendants in DFS pre-order (tree order), depth >= 1. */
-  getDescendants(parent: { id: string; type: ContentType }, maxDepth?: number): Promise<ContentSummary[]>;
+  getDescendants(
+    parent: { id: string; type: ContentType; title?: string },
+    maxDepth?: number,
+    opts?: DescendantsOptions,
+  ): Promise<ContentSummary[]>;
   getSpace(spaceKey: string): Promise<SpaceSummary>;
   /** Top-level content of a space in sidebar order (the homepage first). */
   getSpaceRoots(space: { key: string; id?: string }): Promise<ContentSummary[]>;
-  getPageBody(id: string, type: ContentType): Promise<PageBody>;
+  getPageBody(id: string, type: ContentType, known?: KnownPageInfo): Promise<PageBody>;
   getStorageBody(id: string, type: ContentType): Promise<string>;
-  findPageByTitle(spaceKey: string, title: string): Promise<ContentSummary | null>;
+  /** Exact-title lookup of a page (default) or a blog post in a space. */
+  findPageByTitle(spaceKey: string, title: string, lookup?: TitleLookup): Promise<ContentSummary | null>;
   getCurrentUser(): Promise<{ displayName: string } | null>;
 }
 
@@ -153,6 +179,14 @@ export function qs(params: Record<string, string | number | undefined>): string 
   for (const [k, v] of Object.entries(params)) if (v !== undefined) p.set(k, String(v));
   const s = p.toString();
   return s ? `?${s}` : '';
+}
+
+/** Short reason for a failed request, for warnings ("HTTP 503", "Network error: …"). */
+export function failureReason(e: unknown): string {
+  const status = (e as { status?: unknown } | null)?.status;
+  if (typeof status === 'number' && status > 0) return `HTTP ${status}`;
+  const m = (e as { message?: unknown } | null)?.message;
+  return typeof m === 'string' && m ? m : String(e);
 }
 
 /** CQL string literal. */

@@ -40,6 +40,14 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Third-party license notices are up to date
+        run: node scripts/generate-licenses.mjs --check
+
+      # Release tags only: no template placeholders (contact e-mail, repository owner) may ship.
+      - name: Release check
+        if: startsWith(github.ref, 'refs/tags/')
+        run: npm run check:release
+
       - name: Build (Chrome)
         run: npm run build
 

@@ -142,12 +142,13 @@ describe('buildPrintDocument', () => {
     expect(toc.querySelector('a[href="#p-113"]')!.parentElement!.textContent).toContain('Whiteboard');
   });
 
-  it('writes a page header with marker, title and metadata', () => {
+  it('writes a page header with title and metadata (no hidden marker text)', () => {
     const doc = newDoc();
     buildPrintDocument(doc, input());
     const header = doc.querySelector('#p-111 header.cf-page-meta')!;
-    const marker = header.querySelector('.cf-marker')!;
-    expect(marker.textContent).toBe('⟦cfp:111⟧');
+    // Hidden marker text used to leak into copy/paste, search and text extraction.
+    expect(header.querySelector('.cf-marker')).toBeNull();
+    expect(doc.body.textContent).not.toContain('cfp:');
     expect(header.querySelector('h1')!.textContent).toBe('Architecture');
     const info = header.querySelector('.cf-page-info')!.textContent!;
     expect(info).toContain('Engineering › Payments');
@@ -159,12 +160,11 @@ describe('buildPrintDocument', () => {
     expect(doc.querySelectorAll('#p-111 h1')).toHaveLength(1);
   });
 
-  it('omits the meta line but keeps title and marker when includePageMeta is off', () => {
+  it('omits the meta line but keeps the title when includePageMeta is off', () => {
     const doc = newDoc();
     buildPrintDocument(doc, input({ options: options({ includePageMeta: false }) }));
     const header = doc.querySelector('#p-100 header')!;
     expect(header.querySelector('.cf-page-info')).toBeNull();
-    expect(header.querySelector('.cf-marker')).not.toBeNull();
     expect(header.querySelector('h1')!.textContent).toBe('Checkout v3');
   });
 
@@ -191,7 +191,49 @@ describe('buildPrintDocument', () => {
     const slot = live.querySelector('.cf-live-slot')!;
     expect(slot.getAttribute('data-page-id')).toBe('115');
     expect(live.querySelector('.cf-content')).toBeNull();
-    expect(live.querySelector('.cf-marker')!.textContent).toBe('⟦cfp:115⟧');
+    expect(live.querySelector('h1')!.textContent).toBe('Diagrams');
+  });
+
+  it('sends no referrer with the images it loads', () => {
+    const doc = newDoc();
+    buildPrintDocument(doc, input());
+    expect(doc.head.querySelector('meta[name="referrer"]')!.getAttribute('content')).toBe('no-referrer');
+    // Before any image in the body.
+    expect(doc.head.firstElementChild!.nextElementSibling!.getAttribute('name')).toBe('referrer');
+  });
+
+  it('TOC: children of a page that is not in the PDF take its place', () => {
+    // A(0) › B(1), C(1, skipped) › C1(2), C2(2): C1 and C2 belong under A, not under B.
+    const a = ref('1', 'A', 0);
+    const b = ref('2', 'B', 1, { parentId: '1' });
+    const c = ref('3', 'C', 1, { parentId: '1' });
+    const c1 = ref('4', 'C1', 2, { parentId: '3' });
+    const c2 = ref('5', 'C2', 2, { parentId: '3' });
+    const pages = [a, b, c1, c2].map((r) => ({ ref: r, body: body(r.id, r.title, '<p>x</p>') }));
+    const doc = newDoc();
+    buildPrintDocument(doc, input({ pages, allPages: [a, b, c, c1, c2], excludeIds: ['3'], cover: null }));
+    const toc = doc.querySelector('nav.cf-toc')!;
+    const parentOf = (id: string) =>
+      toc.querySelector(`a[href="#p-${id}"]`)!.closest('li')!.parentElement!.closest('li')?.querySelector('a')?.getAttribute('href') ?? null;
+    expect(parentOf('2')).toBe('#p-1');
+    expect(parentOf('4')).toBe('#p-1');
+    expect(parentOf('5')).toBe('#p-1');
+    expect(parentOf('1')).toBeNull();
+  });
+
+  it('adds placeholder targets for pages printed in another batch', () => {
+    const doc = newDoc();
+    // Batch with only the root: the other exported pages get zero-size targets, so Chrome keeps
+    // the TOC links to them; excluded pages get none.
+    buildPrintDocument(doc, input({ pages: [input().pages[0]!] }));
+    const stubs = Array.from(doc.querySelectorAll<HTMLElement>('.cf-xbatch')).map((e) => e.id);
+    expect(stubs).toEqual(['p-111', 'p-112', 'p-113', 'p-115']);
+    expect(doc.querySelector<HTMLElement>('.cf-xbatch')!.style.position).toBe('absolute');
+    expect(doc.querySelector('nav.cf-toc a[href="#p-112"]')).not.toBeNull();
+    // A single batch with every page needs none.
+    const full = newDoc();
+    buildPrintDocument(full, input());
+    expect(full.querySelector('.cf-xbatch')).toBeNull();
   });
 
   it('renders folders as section headers listing their exported children', () => {
@@ -277,6 +319,30 @@ describe('waitForAssets', () => {
     const res = await waitForAssets(doc, 1000);
     expect(res.imageFailures).toBe(0);
     expect(doc.querySelector('img')).toBe(img);
+  });
+
+  it('does not wait for decode() of ordinary loaded images (it can stall in a background tab)', async () => {
+    const doc = newDoc();
+    doc.body.innerHTML = '<img src="https://acme.atlassian.net/wiki/download/attachments/1/ok.png"/><img src="https://acme.atlassian.net/wiki/download/attachments/1/huge.png"/>';
+    const [small, huge] = Array.from(doc.querySelectorAll('img'));
+    const stalled = () => new Promise<void>(() => undefined);
+    let decodedSmall = false;
+    let decodedHuge = false;
+    for (const [img, w, h, flag] of [
+      [small!, 640, 480, () => (decodedSmall = true)],
+      [huge!, 4000, 3000, () => (decodedHuge = true)],
+    ] as const) {
+      Object.defineProperty(img, 'complete', { value: true });
+      Object.defineProperty(img, 'naturalWidth', { value: w });
+      Object.defineProperty(img, 'naturalHeight', { value: h });
+      Object.defineProperty(img, 'decode', { value: () => (flag(), stalled()) });
+    }
+    const t0 = Date.now();
+    const res = await waitForAssets(doc, 5000);
+    expect(res.imageFailures).toBe(0);
+    expect(decodedSmall).toBe(false);
+    expect(decodedHuge).toBe(true); // very large bitmaps still get a short, capped decode
+    expect(Date.now() - t0).toBeLessThan(1200);
   });
 
   it('prefers the Confluence attachment alias for the file name', () => {

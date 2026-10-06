@@ -118,7 +118,7 @@ async function attach(tabId: number): Promise<void> {
   } catch (e) {
     const msg = errorMessage(e);
     if (/no tab with (given )?id/i.test(msg)) {
-      throw new Error('The export tab was closed before printing finished.');
+      throw new Error('An export helper tab was closed, so the export stopped.');
     }
     if (/already attached/i.test(msg)) {
       // Possibly a stale session of ours (e.g. after a service-worker restart). Detaching only
@@ -189,19 +189,22 @@ function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
   return out;
 }
 
+export interface PrintSession {
+  /** Prints the tab's current document (attaches the debugger on first use). */
+  print(params: PrintParams, hooks?: PrintHooks): Promise<Uint8Array>;
+  /** Detaches the debugger. Always call it (in `finally`). */
+  close(): Promise<void>;
+}
+
 /**
- * Prints the tab's current document to a PDF. Attaches the debugger, prints, streams the
- * result and detaches (always). Aborting detaches immediately, which fails any pending command.
+ * A debugger session on one tab for several prints (e.g. one PDF per page): attaches once, so
+ * Chrome's "started debugging this browser" bar does not flicker per page, and detaches on
+ * `close()` — or at once when `signal` aborts, which fails any pending command.
  */
-export async function printTabToPdf(
-  tabId: number,
-  params: PrintParams,
-  signal?: AbortSignal,
-  hooks?: PrintHooks,
-): Promise<Uint8Array> {
-  if (signal?.aborted) throw abortError();
-  await attach(tabId);
+export function createPrintSession(tabId: number, signal?: AbortSignal): PrintSession {
   const target = { tabId };
+  let attached: Promise<void> | null = null;
+  let closed = false;
   const onAbort = () => void detachQuietly(tabId);
   signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -215,63 +218,103 @@ export async function printTabToPdf(
       if (reason === 'canceled_by_user') {
         throw new Error('Printing was stopped because the debugging bar was closed ("Cancel").');
       }
-      if (reason === 'target_closed') throw new Error('The export tab was closed before printing finished.');
+      if (reason === 'target_closed') throw new Error('An export helper tab was closed, so the export stopped.');
       throw new Error(`${method} failed: ${errorMessage(e)}`);
     }
   };
 
-  try {
-    if (hooks?.beforePrint) await hooks.beforePrint(send);
+  const ensureAttached = async () => {
+    if (closed) throw new Error('The print session is closed.');
+    if (signal?.aborted) throw abortError();
+    // Re-attach when Chrome detached us between prints (e.g. the tab navigated).
+    if (attached && !attachedTabs.has(tabId)) attached = null;
+    attached ??= attach(tabId).catch((e: unknown) => {
+      attached = null;
+      throw e;
+    });
+    await attached;
+  };
 
-    let res: { data?: string; stream?: string } | undefined;
-    try {
-      res = (await send('Page.printToPDF', buildPrintArgs(params, true))) as typeof res;
-    } catch (e) {
-      const msg = errorMessage(e);
-      // Older Chrome builds reject the experimental outline/tagged flags as invalid parameters.
-      if (!signal?.aborted && (params.outline || params.tagged) && /invalid param|unknown|unrecogni[sz]ed/i.test(msg)) {
-        res = (await send('Page.printToPDF', buildPrintArgs(params, false))) as typeof res;
-      } else {
-        throw e;
-      }
-    }
+  return {
+    async print(params: PrintParams, hooks?: PrintHooks): Promise<Uint8Array> {
+      await ensureAttached();
+      if (hooks?.beforePrint) await hooks.beforePrint(send);
 
-    let bytes: Uint8Array;
-    if (res?.stream) {
-      const handle = res.stream;
-      const chunks: Uint8Array[] = [];
-      let total = 0;
+      let res: { data?: string; stream?: string } | undefined;
       try {
-        for (;;) {
-          const r = (await send('IO.read', { handle, size: IO_READ_SIZE })) as
-            | { data: string; eof: boolean; base64Encoded?: boolean }
-            | undefined;
-          if (!r) throw new Error('IO.read returned no data');
-          if (r.data) {
-            const chunk = r.base64Encoded ? base64ToBytes(r.data) : new TextEncoder().encode(r.data);
-            chunks.push(chunk);
-            total += chunk.length;
-          }
-          if (r.eof) break;
+        res = (await send('Page.printToPDF', buildPrintArgs(params, true))) as typeof res;
+      } catch (e) {
+        const msg = errorMessage(e);
+        // Older Chrome builds reject the experimental outline/tagged flags as invalid parameters.
+        if (!signal?.aborted && (params.outline || params.tagged) && /invalid param|unknown|unrecogni[sz]ed/i.test(msg)) {
+          res = (await send('Page.printToPDF', buildPrintArgs(params, false))) as typeof res;
+        } else {
+          throw e;
         }
-      } finally {
-        if (!signal?.aborted) await send('IO.close', { handle }).catch(() => undefined);
       }
-      bytes = concatChunks(chunks, total);
-    } else if (res?.data) {
-      bytes = base64ToBytes(res.data);
-    } else {
-      throw new Error('Chrome returned an empty PDF.');
-    }
 
-    if (bytes.length < 5 || String.fromCharCode(...bytes.subarray(0, 5)) !== '%PDF-') {
-      throw new Error('Chrome returned data that is not a PDF.');
-    }
-    return bytes;
+      let bytes: Uint8Array;
+      if (res?.stream) {
+        const handle = res.stream;
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        try {
+          for (;;) {
+            const r = (await send('IO.read', { handle, size: IO_READ_SIZE })) as
+              | { data: string; eof: boolean; base64Encoded?: boolean }
+              | undefined;
+            if (!r) throw new Error('IO.read returned no data');
+            if (r.data) {
+              const chunk = r.base64Encoded ? base64ToBytes(r.data) : new TextEncoder().encode(r.data);
+              chunks.push(chunk);
+              total += chunk.length;
+            }
+            if (r.eof) break;
+          }
+        } finally {
+          if (!signal?.aborted) await send('IO.close', { handle }).catch(() => undefined);
+        }
+        bytes = concatChunks(chunks, total);
+      } else if (res?.data) {
+        bytes = base64ToBytes(res.data);
+      } else {
+        throw new Error('Chrome returned an empty PDF.');
+      }
+
+      if (bytes.length < 5 || String.fromCharCode(...bytes.subarray(0, 5)) !== '%PDF-') {
+        throw new Error('Chrome returned data that is not a PDF.');
+      }
+      return bytes;
+    },
+    async close(): Promise<void> {
+      if (closed) return;
+      closed = true;
+      signal?.removeEventListener('abort', onAbort);
+      if (attached) {
+        await attached.catch(() => undefined);
+        await detachQuietly(tabId);
+      }
+      detachReasons.delete(tabId);
+    },
+  };
+}
+
+/**
+ * Prints the tab's current document to a PDF. Attaches the debugger, prints, streams the
+ * result and detaches (always). Aborting detaches immediately, which fails any pending command.
+ */
+export async function printTabToPdf(
+  tabId: number,
+  params: PrintParams,
+  signal?: AbortSignal,
+  hooks?: PrintHooks,
+): Promise<Uint8Array> {
+  if (signal?.aborted) throw abortError();
+  const session = createPrintSession(tabId, signal);
+  try {
+    return await session.print(params, hooks);
   } finally {
-    signal?.removeEventListener('abort', onAbort);
-    await detachQuietly(tabId);
-    detachReasons.delete(tabId);
+    await session.close();
   }
 }
 

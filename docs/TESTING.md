@@ -64,25 +64,37 @@ node tests/e2e/mock-confluence/server.mjs 8090 cloud   # the mock on its own (or
   `/confluence` (v1 only, served as `localhost` so the two sites never share cookies). It
   requires the session cookie its HTML pages set, paginates with a page size of 2, returns
   descendants in non-tree order, answers 403 for one page, 429 + `Retry-After: 1` once for
-  another, 404 for one image, and serves a real PNG. Content is in `fixtures.mjs`;
+  another, 404 for one image, and serves a real PNG. "Hostile Page" (109) serves known HTML-injection
+  vectors (`hostile.mjs`, shared with the sanitizer unit test) whose payloads would request
+  `/wiki/__pwned?v=N` if they ran. Content is in `fixtures.mjs`;
   `/__control/*` endpoints and the `log`/`config` fields let tests slow responses and inspect
   every request.
-- Assertions to keep: the downloaded file is a valid PDF, its page count and outline titles match,
-  internal links resolve to named destinations, skipped pages are reported, and **every request
-  the extension makes goes to the mock origin and uses `GET`** (with the session cookie).
+- Assertions to keep: the downloaded file is a valid PDF, its page count matches, its bookmarks
+  follow the page tree (`pageTree()` compares the page bookmarks, ignoring each page's heading
+  bookmarks), internal links resolve to named destinations, skipped pages are reported, and
+  **every request the extension makes goes to the mock origin and uses `GET`** (with the session
+  cookie). The fixtures embed no images from other hosts; real pages may (see PRIVACY.md §2).
 
 What the suite covers (`tests/e2e/export.spec.ts`): (a) single page with metadata, outline,
 prefixed anchors, images and a network check; (b) subtree order, 403 skipped, 429 retried,
-archived excluded; (c) folder; (d) linked pages, de-duplicated, broken image reported;
-(e) separate files → ZIP; (f, f2) cancel while fetching and while assembling (no worker tab or
-debugger session left, next export works); (g) preview pruning; (g2, h2) popup probe on Cloud and
-DC; (g3) popup → preview; (h) Data Center subtree; (i) logged out; (j) live render inserted into
-the PDF with stamped page numbers; (k) several print batches merged; (l) entire space;
-(m) manual selection in tree order; (n) two concurrent exports.
+archived excluded, nested bookmarks with each page's headings; (c) folder; (d) linked pages,
+de-duplicated, broken image reported, breadcrumbs; (e) separate files → ZIP; (f, f2) cancel while
+fetching and while assembling (no worker tab or debugger session left, next export works);
+(g) preview pruning; (g2, h2) popup probe on Cloud and DC; (g3) popup → preview (the preview
+reuses the popup's collection; breadcrumbs in the filtered list); (h) Data Center subtree;
+(i) logged out; (j) live render inserted into the PDF, page numbers stamped on every sheet but
+the cover; (k) several print batches merged, TOC links to pages of the second batch kept and
+resolving to the real sections; (l) entire space; (m) manual selection in tree order; (n) two
+concurrent exports; (o) hostile export_view: no injection vector runs in the worker tab (real
+Chromium), no foreign requests; (p) session expires mid-export → one sign-in error, no per-page
+"no permission" noise; (r) preview collection cancelled, and closing the preview closes its
+helper tab.
 
-Not covered by E2E (Chrome UI the tests cannot drive): the runtime permission prompt and
-`pendingStart` hand-off, the keyboard shortcut, the context menu, notifications, the "Save as"
-dialog and the debugger-unavailable fallback. Check them manually (below).
+Not covered by E2E (Chrome UI the tests cannot drive): the runtime permission prompt and the
+`pendingStart` hand-off (unit-tested: `claimPendingStart` starts a pending export once), the
+keyboard shortcut, the context menu (its link patterns are unit-tested), notifications, the
+"Save as" dialog (cancel/timeout behaviour is unit-tested in `download.test.ts`) and the
+debugger-unavailable fallback. Check them manually (below).
 
 ## Manual QA checklist
 
@@ -105,7 +117,8 @@ Gliffy diagram (if the app is installed), and a page that a second test user can
 - [ ] The toolbar icon is crisp at 16 px and 32 px (try 100 % and 200 % display scaling), in both light and dark browser themes.
 - [ ] The popup on a non-Confluence site says it is not a Confluence page and does nothing else.
 - [ ] The popup on a Confluence page shows the page title, space key and last-updated date.
-- [ ] First export from a site prompts for access to **that origin only**. After you grant it, the export runs, also when the popup closed during the prompt.
+- [ ] First export from a site prompts for access to **that origin only**. After you grant it, the export runs **once** (one job, one download), also when the popup closed during the prompt.
+- [ ] Deny the prompt from the popup (the popup closes), then within a minute add the same site on the options page: **no** export starts by itself.
 - [ ] Revoking the site on the options page means the next export asks again.
 
 ### Acceptance criteria (spec §14, generic)
@@ -120,8 +133,9 @@ Gliffy diagram (if the app is installed), and a page that a second test user can
 - [ ] **Preview** lets you uncheck pages, and the export omits them. More than 150 pages shows a warning; more than 500 requires confirmation.
 - [ ] A page **without view permission** (log in as the second user) is **skipped and reported**. The rest exports fine.
 - [ ] Pages with **draw.io / Gliffy** diagrams show the diagram with **Live render** on. With it off, a placeholder or static image appears and nothing breaks.
-- [ ] **Cancel** stops the job within **2 s**. Afterwards there are **no orphan tabs**, no debugging bar, and no stale `chrome.debugger` session (the next export works).
-- [ ] **Network:** in DevTools for the service worker, the worker tab and the extension pages, every request goes to the Confluence origin being exported. There are no other hosts (no analytics, fonts or CDNs).
+- [ ] **Cancel** stops the job within **2 s**, also right after clicking Export (while the helper tab is still opening) and while Chrome's "Save as" dialog is open (the dialog's download is cancelled; no file appears). Afterwards there are **no orphan tabs**, no debugging bar, and no stale `chrome.debugger` session (the next export works).
+- [ ] Close the preview without exporting: its helper tab (`…/rest/api/space?limit=1`) closes within a few seconds. Quit Chrome during an export with "Continue where you left off" on: after the restart, restored helper tabs close by themselves.
+- [ ] **Network:** in DevTools for the service worker, the worker tab and the extension pages, the extension's own requests go only to the Confluence origin being exported (no analytics, fonts or CDNs). Images embedded in pages from other hosts load from those hosts, without a `Referer` header.
 - [ ] **Read-only:** every request to Confluence is a `GET`.
 - [ ] Works on the **latest stable Chrome and Edge** on **macOS and Windows**.
 
@@ -152,7 +166,7 @@ Gliffy diagram (if the app is installed), and a page that a second test user can
 - [ ] The filename is `{SPACE}_{Root title}_{YYYY-MM-DD}.pdf`, with characters that are invalid on Windows or macOS removed.
 - [ ] With Chrome's "Ask where to save each file" on, the Save dialog appears. With it off, the file goes straight to Downloads.
 - [ ] **Alt+Shift+P** exports the current page without opening the popup.
-- [ ] The **context menu** on a Confluence page link offers *Export this page to PDF* and *Export this page + children*, and both work. It doesn't appear on non-Confluence links.
+- [ ] The **context menu** on a Confluence page link offers *Export this page to PDF* and *Export this page + children*, and both work. It doesn't appear on non-Confluence links (for example `https://example.com/display/foo/bar`). On a not-yet-allowed site it opens the export page with "Allow & export" instead of prompting.
 - [ ] A completion notification appears (and can be turned off in the options).
 - [ ] Closing the source tab mid-export doesn't stop the export.
 - [ ] Throttling: lowering limits on DC, or a large export on Cloud, shows "Throttled by Confluence, retrying…" and then finishes.
@@ -160,7 +174,8 @@ Gliffy diagram (if the app is installed), and a page that a second test user can
 ### Robustness
 
 - [ ] Another debugger is attached (open DevTools on the worker tab before printing, or run a second debugging extension): the export falls back to the print dialog with a clear message.
-- [ ] Session expired or logged out: a clear error, and no partial file.
+- [ ] Session expired or logged out (also mid-export, e.g. sign out in another tab): a clear sign-in error, and no partial file.
+- [ ] A Confluence request that never answers (e.g. a stalled proxy) times out and the export finishes or fails cleanly instead of hanging.
 - [ ] A 100-page export finishes in ≤ 2 min without a tab crash. Watch memory in Chrome's Task Manager; peak should be < 1.5 GB.
 - [ ] Two exports started one after another: both finish, with no interference between them.
 
@@ -169,7 +184,7 @@ Gliffy diagram (if the app is installed), and a page that a second test user can
 See [ENTERPRISE.md](ENTERPRISE.md). With a test policy loaded through `chrome://policy`, or locally
 via `/etc/opt/chrome/policies/managed/` on Linux or a configuration profile on macOS:
 
-- [ ] `blockedSpaceKeys` refuses exports from those spaces.
+- [ ] `blockedSpaceKeys` refuses exports from those spaces. With a block list, a linked page whose space can't be determined is skipped ("could not be checked against your administrator's policy"), never exported.
 - [ ] `disableLiveRender: true` forces Live render off.
 - [ ] `maxPages` blocks larger exports.
 - [ ] `defaultOptions` are used as defaults.
@@ -181,3 +196,4 @@ via `/etc/opt/chrome/policies/managed/` on Linux or a configuration profile on m
 - [ ] `manifest.json` in the ZIP: no `host_permissions` key (or an empty one), and there are no `localhost` entries (those are e2e-only).
 - [ ] The icons appear in `chrome://extensions`, in the toolbar and on the Web Store upload preview.
 - [ ] `npm audit --omit=dev --audit-level=moderate` passes (this also runs in CI).
+- [ ] `npm run check:release` passes: no `<your-email>` / `<owner>` placeholders left in `PRIVACY.md`, `README.md` or `store/*.md`, and `THIRD_PARTY_LICENSES.txt` is current (`npm run licenses`). The ZIP contains `THIRD_PARTY_LICENSES.txt`.

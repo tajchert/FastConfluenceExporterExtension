@@ -85,6 +85,9 @@ export function normalizeOptions(raw: unknown, base: ExportOptions = DEFAULT_OPT
   };
 }
 
+/** Upper limit of the pages printed in one Page.printToPDF call. */
+export const MAX_PRINT_BATCH_SIZE = 400;
+
 /** Validate a stored Settings object, deep-merging it over `base` (DEFAULT_SETTINGS). */
 export function normalizeSettings(raw: unknown, base: Settings = DEFAULT_SETTINGS): Settings {
   const r: Dict = isDict(raw) ? raw : {};
@@ -94,7 +97,8 @@ export function normalizeSettings(raw: unknown, base: Settings = DEFAULT_SETTING
     apiConcurrency: num(r.apiConcurrency, base.apiConcurrency, 1, 10),
     liveRenderConcurrency: num(r.liveRenderConcurrency, base.liveRenderConcurrency, 1, 6),
     liveRenderMacros: [...new Set(stringList(r.liveRenderMacros, base.liveRenderMacros).map((s) => s.toLowerCase()))],
-    printBatchSize: num(r.printBatchSize, base.printBatchSize, 10, 2000),
+    // One print must stay well below Chrome's 5-minute limit for a single debugger call.
+    printBatchSize: num(r.printBatchSize, base.printBatchSize, 10, MAX_PRINT_BATCH_SIZE),
     warnPageCount,
     confirmPageCount: Math.max(warnPageCount, num(r.confirmPageCount, base.confirmPageCount, 1, 100_000)),
     notifyOnComplete: bool(r.notifyOnComplete, base.notifyOnComplete),

@@ -5,10 +5,12 @@ import { describe, expect, it } from 'vitest';
 import {
   buildOutline,
   concatPdfs,
+  finalizeExport,
   finalizePdf,
   findDestinationPages,
   findSectionStartPages,
   readOutline,
+  shiftPageIndex,
   type OutlineItem,
 } from '../../lib/pdf/merge';
 import type { PageRef } from '../../lib/types';
@@ -178,6 +180,87 @@ describe('concatPdfs', () => {
 
   it('rejects an empty list', async () => {
     await expect(concatPdfs([])).rejects.toThrow();
+  });
+
+  it('resolves a name defined by several parts to the part that owns it', async () => {
+    // LIVE defines its own "p-101" (like a cross-batch placeholder target would).
+    const first = await concatPdfs([SECTIONS, LIVE]);
+    expect(Object.fromEntries(await findDestinationPages(first.bytes, ['p-101']))).toEqual({ 'p-101': 1 });
+    const owned = await concatPdfs([SECTIONS, LIVE], (name) => (name === 'p-101' ? 1 : undefined));
+    expect(Object.fromEntries(await findDestinationPages(owned.bytes, ['p-101', 'p-102']))).toEqual({ 'p-101': 6, 'p-102': 2 });
+  });
+
+  it('drops tagged-PDF back-references of copied pages and keeps the language', async () => {
+    const before = await PDFDocument.load(SECTIONS);
+    const tagged = before.getPages().some((p) => p.node.get(PDFName.of('StructParents')) !== undefined);
+    const r = await concatPdfs([SECTIONS, BATCH2]);
+    const doc = await PDFDocument.load(r.bytes);
+    expect(doc.getPages().every((p) => p.node.get(PDFName.of('StructParents')) === undefined)).toBe(true);
+    expect(tagged).toBe(true);
+    const lang = before.catalog.get(PDFName.of('Lang'));
+    if (lang) expect(doc.catalog.get(PDFName.of('Lang'))?.toString()).toBe(lang.toString());
+  });
+});
+
+describe('finalizeExport', () => {
+  const page = (id: string, title: string, depth: number): PageRef => ({ id, title, depth, type: 'page', url: '', reason: depth ? 'descendant' : 'root' });
+
+  it('nests bookmarks by the page tree, keeps each page’s headings and shifts them past live inserts', async () => {
+    const r = await finalizeExport(SECTIONS, {
+      metadata: META,
+      pages: [page('101', 'Alpha page', 0), page('102', 'Beta page', 1), page('103', GAMMA_TITLE, 1)],
+      live: new Map([['102', LIVE]]),
+    });
+    expect(r.pageCount).toBe(7);
+    expect(r.unplacedLive).toEqual([]);
+    expect(titles(await readOutline(r.bytes))).toEqual([
+      ['Alpha page', 1, [['Intro of 101', 1], ['Beta page', 2, [['Intro of 102', 2]]], [GAMMA_TITLE, 6, [['Intro of 103', 6]]]]],
+    ]);
+    const doc = await PDFDocument.load(r.bytes);
+    // Inserted (live) sheets carry no structure back-references into the base document.
+    expect(doc.getPages()[3].node.get(PDFName.of('StructParents'))).toBeUndefined();
+    expect(doc.getTitle()).toBe('Export');
+    expect(doc.catalog.get(PDFName.of('PageMode'))).toEqual(PDFName.of('UseOutlines'));
+  });
+
+  it('children of a page that is not in the PDF take its place', async () => {
+    const r = await finalizeExport(SECTIONS, {
+      metadata: META,
+      pages: [page('101', 'Alpha page', 0), page('102', 'Beta page', 1), page('999', 'Skipped', 1), page('103', GAMMA_TITLE, 2)],
+      excludeIds: ['999'],
+    });
+    expect(titles(await readOutline(r.bytes))).toEqual([
+      ['Alpha page', 1, [['Intro of 101', 1], ['Beta page', 2, [['Intro of 102', 2]]], [GAMMA_TITLE, 4, [['Intro of 103', 4]]]]],
+    ]);
+  });
+
+  it('reports a live page whose section cannot be found, and stamps numbers after the cover', async () => {
+    const r = await finalizeExport(SECTIONS, {
+      metadata: META,
+      pages: [page('101', 'Alpha page', 0), page('555', 'Nowhere', 1)],
+      live: new Map([['555', LIVE]]),
+      stampPageNumbers: { skipFirst: 1 },
+    });
+    expect(r.unplacedLive).toEqual(['555']);
+    expect(r.pageCount).toBe(5);
+    const doc = await PDFDocument.load(r.bytes);
+    const helvetica = (i: number) => {
+      const fonts = doc.getPages()[i].node.Resources()?.lookup(PDFName.of('Font'));
+      return fonts instanceof PDFDict && fonts.values().some((ref) => String((doc.context.lookup(ref) as PDFDict).get(PDFName.of('BaseFont'))) === '/Helvetica');
+    };
+    expect(helvetica(0)).toBe(false);
+    expect(helvetica(1)).toBe(true);
+  });
+
+  it('shiftPageIndex counts the sheets inserted before an index', () => {
+    const inserts = [
+      { afterPageIndex: 1, count: 2 },
+      { afterPageIndex: 5, count: 3 },
+    ];
+    expect(shiftPageIndex(0, inserts)).toBe(0);
+    expect(shiftPageIndex(1, inserts)).toBe(1);
+    expect(shiftPageIndex(2, inserts)).toBe(4);
+    expect(shiftPageIndex(6, inserts)).toBe(11);
   });
 });
 

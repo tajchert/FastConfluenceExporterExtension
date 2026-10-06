@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ConfluenceClient, ContentSummary, PageBody, SpaceSummary } from '../../lib/confluence/client';
+import type { ConfluenceClient, ContentSummary, DescendantsOptions, PageBody, SpaceSummary } from '../../lib/confluence/client';
 import { collect } from '../../lib/confluence/collect';
 import { HttpError } from '../../lib/confluence/http';
 import { DEFAULT_OPTIONS, type ContentType, type ExportRequest, type SiteInfo } from '../../lib/types';
@@ -64,7 +64,7 @@ class FakeClient implements ConfluenceClient {
     this.calls.push(`children:${parent.id}`);
     return this.kids(parent.id).map((n) => this.sum(n));
   }
-  async getDescendants(parent: { id: string }, maxDepth?: number): Promise<ContentSummary[]> {
+  async getDescendants(parent: { id: string }, maxDepth?: number, _opts?: DescendantsOptions): Promise<ContentSummary[]> {
     const out: ContentSummary[] = [];
     const walk = (id: string, d: number) => {
       if (maxDepth !== undefined && d > maxDepth) return;
@@ -154,7 +154,37 @@ describe('collect', () => {
     const r = await collect(tree(), req({ mode: 'subtree', root: { id: 'a', type: 'page' }, depth: 'all' }));
     expect(summary(r.pages)).toEqual(['a@0', 'a1@1', 'a2@1']);
     expect(r.pages[1]!.reason).toBe('descendant');
-    expect(r.warnings.join(' ')).toMatch(/1 archived or draft item was excluded/);
+    expect(r.warnings.join(' ')).toMatch(/1 archived item was excluded/);
+  });
+
+  it('subtree: drafts are excluded even with includeArchived', async () => {
+    const c = tree();
+    c.nodes.set('d', { id: 'd', title: 'Draft', parentId: 'a', position: 9, status: 'draft' });
+    const request = req({ mode: 'subtree', root: { id: 'a', type: 'page' } });
+    request.options.includeArchived = true;
+    const r = await collect(c, request);
+    expect(r.pages.map((p) => p.id)).not.toContain('d');
+    expect(r.warnings).toEqual(['1 unpublished draft was excluded.']);
+  });
+
+  it('tree modes: every page carries its breadcrumb (FR-7)', async () => {
+    const r = await collect(tree(), req({ mode: 'subtree', root: { id: 'a', type: 'page' } }));
+    expect(r.pages.map((p) => [p.id, p.breadcrumb])).toEqual([
+      ['a', ['Home']],
+      ['a1', ['Home', 'A']],
+      ['a2', ['Home', 'A']],
+    ]);
+  });
+
+  it('subtree: a branch that cannot be listed is reported, not fatal', async () => {
+    const c = tree();
+    c.getDescendants = async (_parent: { id: string }, _depth?: number, opts?: DescendantsOptions) => {
+      opts?.onWarning?.('Could not list the pages under “A1” (HTTP 503); that branch was skipped.');
+      return [];
+    };
+    const r = await collect(c, req({ mode: 'subtree', root: { id: 'a', type: 'page' } }));
+    expect(r.pages.map((p) => p.id)).toEqual(['a']);
+    expect(r.warnings).toEqual(['Could not list the pages under “A1” (HTTP 503); that branch was skipped.']);
   });
 
   it('subtree: includeArchived keeps archived content', async () => {
@@ -203,7 +233,7 @@ describe('collect', () => {
                  <a href="https://acme.atlassian.net/wiki/spaces/ENG/pages/arch">archived</a>`,
         },
         { id: 'l1', title: 'Linked 1', html: `${link('h2')} ${link('r')}` },
-        { id: 'l2', title: 'Linked 2', html: '<p>no links</p>', storage: '<ac:link><ri:page ri:content-title="By Title" /></ac:link>' },
+        { id: 'l2', title: 'Linked 2', html: '', storage: '<ac:link><ri:page ri:content-title="By Title" /></ac:link>' },
         { id: 'h2', title: 'Hop 2', html: link('h3') },
         { id: 'h3', title: 'Hop 3' },
         { id: 'fo', title: 'Some folder', type: 'folder' },
@@ -251,7 +281,24 @@ describe('collect', () => {
         'By Title@2',
       ]);
       expect(c.calls).toContain('storage:1002');
+      // export_view without links (but not empty) needs no storage request.
+      expect(c.calls).not.toContain('storage:1003');
       expect(r.pages.some((p) => p.title === 'Hop 3')).toBe(false);
+    });
+
+    it('stops following links at the budget and says so', async () => {
+      const c = numeric(linkedClient());
+      const r = await collect(c, req({ mode: 'linked', root: { id: '1000', type: 'page' }, linkDepth: 2 }), { maxItems: 2 });
+      expect(r.pages.map((p) => p.title)).toEqual(['Root', 'Linked 1']);
+      expect(r.warnings.some((w) => /truncated at 2 items/.test(w))).toBe(true);
+      expect(c.calls.filter((x) => x.startsWith('body:'))).toEqual(['body:1000']);
+    });
+
+    it('linked pages carry breadcrumbs', async () => {
+      const c = numeric(linkedClient());
+      c.nodes.get('1001')!.parentId = '1004';
+      const r = await collect(c, req({ mode: 'linked', root: { id: '1000', type: 'page' }, linkDepth: 1 }));
+      expect(r.pages.find((p) => p.title === 'Linked 1')?.breadcrumb).toEqual(['Hop 3']);
     });
   });
 
@@ -263,6 +310,7 @@ describe('collect', () => {
     );
     expect(summary(r.pages)).toEqual(['fp@0', 'a@0', 'a1@1', 'a2@1', 'b@0']);
     expect(r.pages.every((p) => p.reason === 'selected')).toBe(true);
+    expect(r.pages.map((p) => p.breadcrumb)).toEqual([['Home', 'Folder'], ['Home'], ['Home', 'A'], ['Home', 'A'], ['Home']]);
     expect(r.warnings.some((w) => w.includes('missing'))).toBe(true);
   });
 

@@ -2,16 +2,38 @@
  * Finds links to other Confluence content in a page body (FR-5). Only same-site content links are
  * returned; attachments, Jira, people, external and mailto links are ignored.
  */
-import type { SiteInfo } from '../types';
+import type { ContentType, SiteInfo } from '../types';
 import { decodeTinyCode, isSameSite, parseConfluenceUrl } from './url';
+
+export interface TitleTarget {
+  spaceKey?: string;
+  title: string;
+  /** Set for blog posts (DC dated URLs, `ri:blog-post`); pages otherwise. */
+  type?: 'blogpost';
+  /** Blog posts: `YYYY-MM-DD`. */
+  postingDay?: string;
+}
 
 export interface LinkTargets {
   ids: string[];
-  titles: { spaceKey?: string; title: string }[];
+  /**
+   * Content type of an id when the link tells it (`data-linked-resource-type`, URL shape), so
+   * resolving it needs no type discovery (up to 6 requests on Cloud for an unknown id).
+   */
+  types: Record<string, ContentType>;
+  titles: TitleTarget[];
   tinyCodes: string[];
 }
 
-const LINKABLE_RESOURCE_TYPES = new Set(['page', 'blogpost', 'blog_post', 'folder', 'whiteboard', 'database', 'embed']);
+const RESOURCE_TYPES: Record<string, ContentType> = {
+  page: 'page',
+  blogpost: 'blogpost',
+  blog_post: 'blogpost',
+  folder: 'folder',
+  whiteboard: 'whiteboard',
+  database: 'database',
+  embed: 'embed',
+};
 /** Paths (relative to the context path) that never point at exportable content. */
 const IGNORED_PATH = /^\/(download|browse|people|images|s|plugins\/servlet|secure|rest|api)\//i;
 const IGNORED_ACTION = /\/viewpageattachments\.action$/i;
@@ -20,26 +42,38 @@ class Collector {
   private readonly idSet = new Set<string>();
   private readonly titleSet = new Set<string>();
   private readonly codeSet = new Set<string>();
-  readonly out: LinkTargets = { ids: [], titles: [], tinyCodes: [] };
+  readonly out: LinkTargets = { ids: [], types: {}, titles: [], tinyCodes: [] };
 
   constructor(
     private readonly site: SiteInfo,
     private readonly selfId: string,
   ) {}
 
-  addId(id: string | null | undefined): void {
-    if (!id || !/^\d+$/.test(id) || id === this.selfId || this.idSet.has(id)) return;
+  addId(id: string | null | undefined, type?: ContentType): void {
+    if (!id || !/^\d+$/.test(id) || id === this.selfId) return;
+    if (type && !this.out.types[id]) this.out.types[id] = type;
+    if (this.idSet.has(id)) return;
     this.idSet.add(id);
     this.out.ids.push(id);
   }
 
-  addTitle(title: string | null | undefined, spaceKey?: string | null): void {
+  addTitle(
+    title: string | null | undefined,
+    spaceKey?: string | null,
+    blog?: { postingDay?: string },
+  ): void {
     const t = (title ?? '').trim();
     if (!t) return;
-    const key = `${spaceKey ?? ''}\u0000${t}`;
+    const key = `${spaceKey ?? ''}\u0000${t}\u0000${blog ? `blog:${blog.postingDay ?? ''}` : ''}`;
     if (this.titleSet.has(key)) return;
     this.titleSet.add(key);
-    this.out.titles.push(spaceKey ? { spaceKey, title: t } : { title: t });
+    const target: TitleTarget = { title: t };
+    if (spaceKey) target.spaceKey = spaceKey;
+    if (blog) {
+      target.type = 'blogpost';
+      if (blog.postingDay) target.postingDay = blog.postingDay;
+    }
+    this.out.titles.push(target);
   }
 
   addTiny(code: string): void {
@@ -67,7 +101,8 @@ class Collector {
     if (!isSameSite(abs.toString(), this.site)) return;
     const path = abs.pathname.slice(this.site.contextPath.length);
     if (IGNORED_PATH.test(path + '/') || IGNORED_ACTION.test(path)) return;
-    if (/^\/display\/~/.test(path)) return;
+    // A personal space's profile (`/display/~user`), not a page in it (`/display/~user/Title`).
+    if (/^\/display\/~[^/]+\/?$/.test(path)) return;
     const p = parseConfluenceUrl(abs.toString(), this.site.contextPath);
     switch (p.kind) {
       case 'page':
@@ -76,8 +111,9 @@ class Collector {
       case 'whiteboard':
       case 'database':
       case 'embed':
-        if (p.id) this.addId(p.id);
+        if (p.id) this.addId(p.id, p.kind);
         else if (p.title && p.kind === 'page') this.addTitle(p.title, p.spaceKey);
+        else if (p.title && p.kind === 'blogpost') this.addTitle(p.title, p.spaceKey, { postingDay: p.postingDay });
         break;
       case 'tiny':
         if (p.tinyCode) this.addTiny(p.tinyCode);
@@ -100,9 +136,10 @@ export function extractLinksFromExportView(html: string, site: SiteInfo, selfId:
     const resType = el.getAttribute('data-linked-resource-type')?.toLowerCase();
     const resId = el.getAttribute('data-linked-resource-id');
     if (resType) {
-      if (!LINKABLE_RESOURCE_TYPES.has(resType)) continue; // attachment, userinfo, space, ...
+      const type = RESOURCE_TYPES[resType];
+      if (!type) continue; // attachment, userinfo, space, ...
       if (resId && /^\d+$/.test(resId)) {
-        c.addId(resId);
+        c.addId(resId, type);
         continue;
       }
     }
@@ -153,10 +190,18 @@ export function extractLinksFromStorage(storage: string, site: SiteInfo, selfId:
     const a = attrs(m[2] ?? '');
     if (name === 'ri:page') {
       const id = a.get('ri:content-id');
-      if (id) c.addId(id);
+      if (id) c.addId(id, 'page');
       else c.addTitle(a.get('ri:content-title'), a.get('ri:space-key'));
-    } else if (name === 'ri:content-entity' || name === 'ri:blog-post') {
-      // Blog posts referenced only by title + posting day cannot be resolved by findPageByTitle.
+    } else if (name === 'ri:blog-post') {
+      const id = a.get('ri:content-id');
+      if (id) c.addId(id, 'blogpost');
+      else {
+        // Storage writes the posting day as YYYY/MM/DD.
+        const day = /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/.exec(a.get('ri:posting-day') ?? '');
+        const postingDay = day ? `${day[1]}-${day[2]!.padStart(2, '0')}-${day[3]!.padStart(2, '0')}` : undefined;
+        c.addTitle(a.get('ri:content-title'), a.get('ri:space-key'), { postingDay });
+      }
+    } else if (name === 'ri:content-entity') {
       c.addId(a.get('ri:content-id'));
     } else if (name === 'ri:url') {
       c.addUrl(a.get('ri:value'));

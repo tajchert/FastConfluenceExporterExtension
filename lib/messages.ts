@@ -34,8 +34,6 @@ export type RpcResult<T> = { ok: true; value: T } | { ok: false; error: string; 
 // ───────────────────────────── UI (popup / preview / options) → service worker ─────────────
 
 export type UiToSw =
-  /** Resolve the page list for a request without exporting (preview, FR-7). */
-  | { type: 'collect'; request: ExportRequest }
   /** Lazy tree for the manual picker (FR-6). parentId omitted = space roots. */
   | {
       type: 'tree/children';
@@ -43,12 +41,22 @@ export type UiToSw =
       spaceKey: string;
       spaceId?: string;
       parent?: { id: string; type: TreeNode['type'] };
+      /** Tab the export started from (keeps the helper tab in that tab's profile, e.g. incognito). */
+      sourceTabId?: number;
     }
   /**
    * Start an export. `pages` = the (possibly pruned) list from the preview. When omitted
    * (popup "This page" / shortcut / context menu) the SW collects itself and skips the preview.
    */
   | { type: 'job/start'; request: ExportRequest; pages?: PageRef[] }
+  /**
+   * Popup after a permission grant: start the pending export exactly once. The service worker
+   * may already have started it from `permissions.onAdded`; both go through one claim keyed by
+   * `pending.createdAt`, so the same export never runs twice.
+   */
+  | { type: 'job/claimPending'; pending: PendingStartPayload }
+  /** Start an interrupted export again with its stored page list (no new collection). */
+  | { type: 'job/retry'; jobId: string }
   | { type: 'job/cancel'; jobId: string }
   | { type: 'job/get'; jobId: string }
   /** Most recent jobs (newest first), for the popup "last export" line. */
@@ -56,15 +64,42 @@ export type UiToSw =
   /** Open the preview tab for a multi-page request (the popup closes on blur). */
   | { type: 'preview/open'; request: ExportRequest };
 
+export interface PendingStartPayload {
+  request: ExportRequest;
+  pages?: PageRef[];
+  createdAt: number;
+}
+
 export interface UiToSwResponses {
-  collect: { pages: PageRef[]; warnings: string[] };
   'tree/children': TreeNode[];
   'job/start': { jobId: string };
+  'job/claimPending': { jobId: string };
+  'job/retry': { jobId: string };
   'job/cancel': void;
   'job/get': ExportJobState | null;
   'job/list': ExportJobState[];
   'preview/open': { tabId: number };
 }
+
+// ───────────────────────────── UI ↔ service worker port (collect) ─────────────
+
+/**
+ * Page collection for the preview / popup runs over a long-lived port (`chrome.runtime.connect`)
+ * instead of one request: a big space can take minutes, longer than Chrome lets a single event
+ * stay pending in the service worker. The port also tells the SW when the page went away, so it
+ * cancels that page's collections and closes the idle helper tab.
+ */
+export const UI_PORT_NAME = 'cfp-ui';
+
+export type UiPortRequest =
+  | { type: 'collect/start'; requestId: string; request: ExportRequest }
+  | { type: 'collect/cancel'; requestId: string };
+
+export type UiPortEvent =
+  /** Progress text, or a throttling notice (`throttledForMs`) while Confluence rate-limits us. */
+  | { type: 'collect/progress'; requestId: string; message?: string; throttledForMs?: number }
+  | { type: 'collect/done'; requestId: string; result: { pages: PageRef[]; warnings: string[] } }
+  | { type: 'collect/failed'; requestId: string; error: string; code?: string };
 
 /** Broadcast from the SW to every extension page (runtime.sendMessage, no response). */
 export type SwBroadcast = { type: 'job/update'; job: ExportJobState };
@@ -73,8 +108,13 @@ export type SwBroadcast = { type: 'job/update'; job: ExportJobState };
 
 export type SwToWorker =
   | { type: 'worker/ping' }
-  /** Resolve the page set for a request. Runs the collector (lib/confluence/collect.ts). */
-  | { type: 'worker/collect'; jobId?: string; request: ExportRequest }
+  /**
+   * Resolve the page set for a request. Runs the collector (lib/confluence/collect.ts) in the
+   * background: answers `{ started: true }` at once and reports the outcome with a `worker/done`
+   * notification (op 'collect'), so no single message stays pending for minutes. `transient`
+   * = a preview collection whose state is dropped when it ends.
+   */
+  | { type: 'worker/collect'; jobId: string; request: ExportRequest; maxItems?: number; transient?: boolean }
   | {
       type: 'worker/children';
       site: SiteInfo;
@@ -84,7 +124,8 @@ export type SwToWorker =
     }
   /**
    * Fetch export_view bodies + metadata for the given pages (pool, retry, 429 back-off) and keep
-   * them in worker memory keyed by page id. Progress is reported with `worker/progress`.
+   * them in worker memory keyed by page id. Progress is reported with `worker/progress`. Runs in
+   * the background like `worker/collect` (outcome: `worker/done`, op 'fetch').
    */
   | {
       type: 'worker/fetch';
@@ -108,6 +149,8 @@ export type SwToWorker =
       pageIds: string[];
       liveRenderIds: string[];
       allPages: PageRef[]; // the full export, for link rewriting (#p-{id}) and TOC
+      /** Ids of `allPages` that are not in the PDF (failed / skipped): left out of the TOC. */
+      excludeIds?: string[];
       options: ExportOptions;
       cover: CoverInfo | null; // null = no cover in this batch
       toc: boolean;
@@ -133,11 +176,18 @@ export interface CoverInfo {
   siteTitle?: string;
 }
 
+/** Outcome payloads of the background operations (`worker/done`). */
+export interface WorkerOpResults {
+  collect: { pages: PageRef[]; warnings: string[] };
+  fetch: { results: FetchedPageInfo[] };
+}
+export type WorkerOp = keyof WorkerOpResults;
+
 export interface SwToWorkerResponses {
   'worker/ping': { ready: true };
-  'worker/collect': { pages: PageRef[]; warnings: string[] };
+  'worker/collect': { started: true };
   'worker/children': TreeNode[];
-  'worker/fetch': { results: FetchedPageInfo[] };
+  'worker/fetch': { started: true };
   'worker/assemble': {
     /** Number of images that failed to load and were replaced by placeholders. */
     imageFailures: number;
@@ -163,6 +213,8 @@ export interface ResolvedContent {
 export type WorkerToSw =
   | { type: 'worker/progress'; jobId: string; done: number; total: number; current?: string }
   | { type: 'worker/throttled'; jobId: string; retryInMs: number }
+  /** A background `worker/collect` / `worker/fetch` finished (`result`) or failed (`error`). */
+  | { type: 'worker/done'; jobId: string; op: WorkerOp; result?: unknown; error?: string; code?: string }
   | { type: 'worker/ready' };
 
 // ───────────────────────────── live render (FR-10) ─────────────────────────────────────────

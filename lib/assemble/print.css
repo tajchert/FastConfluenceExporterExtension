@@ -127,10 +127,12 @@ h4 {
 h5 {
   font-size: 11pt;
 }
+/* Small caps, not text-transform: Chrome builds PDF bookmarks from the rendered text, and an
+   uppercase transform would leak into bookmark titles, search and copied text. */
 h6 {
   font-size: 10pt;
   color: var(--cf-text-muted);
-  text-transform: uppercase;
+  font-variant-caps: all-small-caps;
   letter-spacing: 0.04em;
 }
 
@@ -329,13 +331,15 @@ img[data-emoji-shortname] {
   max-width: 100%;
 }
 
+/* 1px short of the content width: with collapsed borders half of the outer border is painted
+   outside the table box, and at exactly 100% the right border is clipped at the printable area. */
 table {
   border-collapse: collapse;
   border-spacing: 0;
   margin: 0.8em 0;
   font-size: 9.5pt;
   line-height: 1.45;
-  max-width: 100%;
+  max-width: calc(100% - 1px);
 }
 
 .table-wrap > table {
@@ -413,7 +417,7 @@ caption {
 /* Wide tables (shrinkWideTables): marked by the assembler after measuring. */
 table.cf-wide {
   font-size: 8.5pt;
-  width: 100% !important;
+  width: calc(100% - 1px) !important;
 }
 
 table.cf-wide th,
@@ -421,10 +425,23 @@ table.cf-wide td {
   padding: 4px 5px;
 }
 
+/* Headers may wrap once a table had to shrink (Jira tables set them nowrap): otherwise long
+   column names overflow into their neighbours. */
+table.cf-wide th,
+table.cf-wide-xl th {
+  white-space: normal !important;
+}
+
 table.cf-wide-xl {
   font-size: 7.5pt;
+  width: calc(100% - 1px) !important;
+}
+
+/* Fixed layout only when the author's column widths were kept (as percentages); without them a
+   fixed layout would give every column the same width. Auto layout + anywhere-wrapping lets
+   text-heavy columns take the room they need and still shrink. */
+table.cf-wide-xl.cf-fixed {
   table-layout: fixed;
-  width: 100% !important;
 }
 
 table.cf-wide-xl th,
@@ -433,6 +450,12 @@ table.cf-wide-xl td {
   overflow-wrap: anywhere;
   word-break: break-word;
   min-width: 0 !important;
+}
+
+/* Jira cells set their own size: let them follow the shrunken table. */
+table.cf-wide td.jira-macro-table-underline-pdfexport,
+table.cf-wide-xl td.jira-macro-table-underline-pdfexport {
+  font-size: inherit;
 }
 
 table.cf-wide-xl pre,
@@ -447,7 +470,7 @@ table.cf-wide-xl code {
 }
 
 table.aui {
-  width: 100%;
+  width: calc(100% - 1px);
 }
 
 table.aui th {
@@ -1178,18 +1201,6 @@ ul.toc-indentation {
   border-bottom: 1px solid var(--cf-border-light);
   break-inside: avoid;
   break-after: avoid;
-}
-
-/* Hidden-in-plain-sight merge marker: must remain real (extractable) text. */
-.cf-marker {
-  display: block;
-  height: 1px;
-  overflow: visible;
-  color: #fff;
-  font-size: 1px;
-  line-height: 1px;
-  white-space: nowrap;
-  user-select: none;
 }
 
 .cf-page-title {

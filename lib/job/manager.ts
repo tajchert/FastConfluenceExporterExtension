@@ -1,16 +1,16 @@
 /**
  * Job manager (service worker): starts/cancels jobs, owns the in-memory job table, persists job
  * state to chrome.storage.session, broadcasts `job/update` to extension pages (throttled), keeps
- * the action badge and completion notifications up to date, enforces the managed policy, and
- * caches a per-site "preview" worker tab so the preview's collect / tree requests are fast.
+ * the action badge and completion notifications up to date, enforces the managed policy, runs
+ * the preview's page collections (over a UI port) and caches a per-site "preview" worker tab so
+ * the preview's collect / tree requests are fast.
  */
-import { PDFDocument } from 'pdf-lib';
-import { saveBytes } from '../download';
-import type { SwBroadcast, SwToWorker, WorkerToSw } from '../messages';
-import { buildOutline, concatPdfs, finalizePdf, findSectionStartPages, readOutline } from '../pdf/merge';
+import { saveBytes, showDownloadItem } from '../download';
+import type { PendingStartPayload, SwBroadcast, SwToWorker, UiPortEvent, UiPortRequest, WorkerToSw } from '../messages';
+import { concatPdfs, finalizeExport, finalizePdf } from '../pdf/merge';
 import { zipFiles } from '../pdf/zip';
 import { hasSiteAccess } from '../permissions';
-import { DebuggerUnavailableError, detachAll, printTabToPdf, toPrintParams } from '../render/cdp';
+import { DebuggerUnavailableError, createPrintSession, detachAll, toPrintParams } from '../render/cdp';
 import { liveRenderPages } from '../render/liveRender';
 import { closeOrphanTabs, closeTabQuietly, ensureWorker, openWorkerTab, unregisterOrphan } from '../render/tabs';
 import { RpcError, callWorker } from '../rpc';
@@ -28,11 +28,19 @@ import type {
   TreeNode,
 } from '../types';
 import { encodeRequestParam } from '../util/base64';
-import { applyPolicyToPages, isBlockedSpace, maxPagesError, runJob, type RunnerDeps } from './runner';
+import { jobPercent } from './progress';
+import { BLOCKED_MESSAGE, applyPolicyToPages, isBlockedSpace, maxPagesError, runJob, type RunnerDeps } from './runner';
 import * as store from './store';
+import { runWorkerOp } from './workerOp';
+
+export { jobPercent };
 
 const BROADCAST_INTERVAL_MS = 200;
 const PREVIEW_TAB_IDLE_MS = 2 * 60_000;
+/** After the last extension page went away, idle helper tabs are closed after this grace time. */
+const NO_UI_GRACE_MS = 5000;
+/** A preview reuses a collection made this recently for the same request (the popup's count). */
+const COLLECT_CACHE_TTL_MS = 90_000;
 const CANCEL_WAIT_MS = 2500;
 const BADGE_COLOR = '#0C66E4';
 const NOTIFICATION_PREFIX = 'cfp-job:';
@@ -49,19 +57,37 @@ interface RunningJob {
 
 const running = new Map<string, RunningJob>();
 
+interface PreviewTab {
+  key: string;
+  tab: Promise<number>;
+  busy: number;
+  timer?: ReturnType<typeof setTimeout>;
+}
+const previewTabs = new Map<string, PreviewTab>();
+
+interface ActiveCollect {
+  controller: AbortController;
+}
+const activeCollects = new Map<string, ActiveCollect>();
+const uiPorts = new Set<chrome.runtime.Port>();
+
 // ───────────────────────────── service-worker keepalive ─────────────────────────────
 // Chrome stops an idle service worker after ~30 s without extension events or API calls. Some
-// export phases can be silent for longer (waiting for a "Save as" dialog, slow live renders,
-// huge print jobs), so while a job runs a trivial extension API call resets the idle timer.
+// phases can be silent for longer (waiting for a "Save as" dialog, slow live renders, huge print
+// jobs, 429 back-off during a preview collection), so while a job or a collection runs — or a
+// cached helper tab waits for its idle close — a trivial extension API call resets the idle
+// timer. It does not lift Chrome's 5-minute limit for a single event or API call: long worker
+// operations therefore run in the background (lib/job/workerOp.ts).
 const KEEPALIVE_MS = 20_000;
 let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
 
 function updateKeepAlive(): void {
-  if (running.size > 0 && keepAliveTimer === undefined) {
+  const needed = running.size > 0 || activeCollects.size > 0 || previewTabs.size > 0;
+  if (needed && keepAliveTimer === undefined) {
     keepAliveTimer = setInterval(() => {
       chrome.runtime.getPlatformInfo().catch(() => undefined);
     }, KEEPALIVE_MS);
-  } else if (running.size === 0 && keepAliveTimer !== undefined) {
+  } else if (!needed && keepAliveTimer !== undefined) {
     clearInterval(keepAliveTimer);
     keepAliveTimer = undefined;
   }
@@ -88,7 +114,8 @@ let readyPromise: Promise<void> | null = null;
 
 /**
  * Runs once per service-worker instance before anything else: closes tabs and debugger sessions
- * left behind by a previous instance and marks interrupted jobs as failed.
+ * left behind by a previous instance and marks interrupted jobs as failed (their stored page
+ * list lets "Try again" start them over without collecting again).
  */
 export function init(): Promise<void> {
   readyPromise ??= (async () => {
@@ -102,6 +129,7 @@ export function init(): Promise<void> {
           ...job,
           status: 'error',
           message,
+          interrupted: true,
           finishedAt: Date.now(),
           errors: [...job.errors, { pageId: '', title: '', message, severity: 'fatal' }],
         });
@@ -123,9 +151,24 @@ function snapshot(job: ExportJobState): ExportJobState {
   return structuredClone(job);
 }
 
+/**
+ * What is persisted and broadcast up to five times a second: no page list (the UI only needs
+ * the count) and no custom CSS. A 3,000-page export would otherwise serialize about 1 MB per
+ * update, and a few stored jobs would fill session storage and break every other session write.
+ */
+export function slimJob(job: ExportJobState): ExportJobState {
+  const { customCss: _customCss, ...options } = job.request.options;
+  return structuredClone({
+    ...job,
+    request: { ...job.request, options: { ...options, customCss: '' } },
+    pages: [],
+    pageCount: job.pageCount ?? job.pages.length,
+  });
+}
+
 function sendUpdate(job: ExportJobState): void {
   lastBroadcast.set(job.id, Date.now());
-  const snap = snapshot(job);
+  const snap = slimJob(job);
   store.saveJob(snap).catch(() => undefined);
   const msg: SwBroadcast = { type: 'job/update', job: snap };
   // Rejects with "Receiving end does not exist" when no extension page is open.
@@ -154,24 +197,6 @@ function publish(job: ExportJobState): void {
       sendUpdate(job);
     }, BROADCAST_INTERVAL_MS - elapsed),
   );
-}
-
-/** Rough overall completion used for the badge. */
-export function jobPercent(job: ExportJobState): number {
-  const { done, total } = job.progress;
-  const frac = total > 0 ? Math.min(1, Math.max(0, done / total)) : 0;
-  switch (job.status) {
-    case 'collecting':
-      return 2;
-    case 'fetching':
-      return Math.round(5 + 55 * frac);
-    case 'rendering':
-      return Math.round(60 + 30 * frac);
-    case 'merging':
-      return 92;
-    default:
-      return 100;
-  }
 }
 
 let badgeText = '';
@@ -230,25 +255,19 @@ export async function handleNotificationClick(notificationId: string): Promise<v
   const jobId = notificationId.slice(NOTIFICATION_PREFIX.length);
   chrome.notifications.clear(notificationId).catch(() => undefined);
   const job = await getJob(jobId);
-  if (job?.result?.downloadId !== undefined) {
-    try {
-      chrome.downloads.show(job.result.downloadId);
-      return;
-    } catch {
-      /* download removed from history */
-    }
-  }
+  // downloads.show() never throws for a missing item (it only sets runtime.lastError): check first.
+  if (await showDownloadItem(job?.result?.downloadId)) return;
   if (job) await openJobPage(job.id);
 }
 
 // ───────────────────────────── worker notifications ─────────────────────────────
 
-/** Route `worker/progress` / `worker/throttled` from worker tabs to the job that owns them. */
+/** Route `worker/progress` / `worker/throttled` / `worker/done` from worker tabs to their job or collection. */
 export function handleWorkerMessage(msg: WorkerToSw): void {
   if (msg.type === 'worker/ready') return;
   const listeners = workerListeners.get(msg.jobId);
   if (!listeners) return;
-  for (const l of listeners) {
+  for (const l of [...listeners]) {
     try {
       l(msg);
     } catch {
@@ -263,45 +282,56 @@ function subscribeWorker(jobId: string, listener: (msg: WorkerToSw) => void): ()
   set.add(listener);
   return () => {
     set!.delete(listener);
-    if (!set!.size) workerListeners.delete(jobId);
+    if (!set!.size && workerListeners.get(jobId) === set) workerListeners.delete(jobId);
   };
 }
 
 // ───────────────────────────── preview worker tab cache ─────────────────────────────
 
-interface PreviewTab {
-  key: string;
-  tab: Promise<number>;
-  busy: number;
-  timer?: ReturnType<typeof setTimeout>;
-}
-const previewTabs = new Map<string, PreviewTab>();
-
 const siteKey = (site: SiteInfo) => site.baseUrl.replace(/\/+$/, '');
 
-function scheduleIdleClose(entry: PreviewTab): void {
+/**
+ * Cache key of a helper tab: the site, and whether the export started from an incognito tab (an
+ * incognito session has its own cookies, so a regular-profile tab must never serve it).
+ */
+async function previewKey(site: SiteInfo, nearTabId: number | undefined): Promise<string> {
+  let incognito = false;
+  if (nearTabId !== undefined) {
+    try {
+      incognito = !!(await chrome.tabs.get(nearTabId)).incognito;
+    } catch {
+      /* tab gone */
+    }
+  }
+  return `${siteKey(site)}${incognito ? '|incognito' : ''}`;
+}
+
+function scheduleIdleClose(entry: PreviewTab, ms = PREVIEW_TAB_IDLE_MS): void {
   if (entry.timer) clearTimeout(entry.timer);
   entry.timer = setTimeout(() => {
     if (entry.busy > 0 || previewTabs.get(entry.key) !== entry) return;
     previewTabs.delete(entry.key);
+    updateKeepAlive();
     entry.tab.then((id) => closeTabQuietly(id), () => undefined);
-  }, PREVIEW_TAB_IDLE_MS);
+  }, ms);
 }
 
 function dropPreviewTab(entry: PreviewTab): void {
   if (entry.timer) clearTimeout(entry.timer);
   if (previewTabs.get(entry.key) === entry) previewTabs.delete(entry.key);
+  updateKeepAlive();
 }
 
 /** Runs `fn` against the cached preview worker tab for `site` (opened on demand). */
 async function withPreviewTab<T>(site: SiteInfo, nearTabId: number | undefined, fn: (tabId: number) => Promise<T>): Promise<T> {
-  const key = siteKey(site);
+  const key = await previewKey(site, nearTabId);
   for (let attempt = 0; ; attempt++) {
     let entry = previewTabs.get(key);
     const wasCached = !!entry;
     if (!entry) {
       entry = { key, tab: openWorkerTab(site, nearTabId), busy: 0 };
       previewTabs.set(key, entry);
+      updateKeepAlive();
     }
     const current = entry;
     if (current.timer) clearTimeout(current.timer);
@@ -322,14 +352,16 @@ async function withPreviewTab<T>(site: SiteInfo, nearTabId: number | undefined, 
       return await fn(tabId);
     } finally {
       current.busy--;
-      if (previewTabs.get(key) === current && current.busy === 0) scheduleIdleClose(current);
+      if (previewTabs.get(key) === current && current.busy === 0) {
+        scheduleIdleClose(current, uiPorts.size ? PREVIEW_TAB_IDLE_MS : NO_UI_GRACE_MS);
+      }
     }
   }
 }
 
 /** Hands the cached preview tab over to a job (the job closes it when done). */
-async function takePreviewTab(site: SiteInfo): Promise<number | undefined> {
-  const entry = previewTabs.get(siteKey(site));
+async function takePreviewTab(site: SiteInfo, nearTabId: number | undefined): Promise<number | undefined> {
+  const entry = previewTabs.get(await previewKey(site, nearTabId));
   if (!entry || entry.busy > 0) return undefined;
   dropPreviewTab(entry);
   try {
@@ -340,6 +372,11 @@ async function takePreviewTab(site: SiteInfo): Promise<number | undefined> {
     entry.tab.then((id) => closeTabQuietly(id), () => undefined);
     return undefined;
   }
+}
+
+/** No extension page is open any more: close idle helper tabs soon instead of after 2 minutes. */
+function closeIdlePreviewTabsSoon(): void {
+  for (const entry of previewTabs.values()) if (entry.busy === 0) scheduleIdleClose(entry, NO_UI_GRACE_MS);
 }
 
 // ───────────────────────────── validation / policy ─────────────────────────────
@@ -409,38 +446,184 @@ export async function openJobPage(jobId: string, nearTabId?: number): Promise<nu
   return openTabNear(chrome.runtime.getURL(`/preview.html?job=${encodeURIComponent(jobId)}`), nearTabId);
 }
 
-/** UiToSw 'collect': resolve the page list for the preview (blocked spaces removed). */
+// ───────────────────────────── page collection for the preview / popup ─────────────────────────────
+
+interface CachedCollect {
+  at: number;
+  result: { pages: PageRef[]; warnings: string[] };
+}
+/** Raw collection results (before the policy filter) for a short while, keyed by collectKey(). */
+const collectCache = new Map<string, CachedCollect>();
+
+/**
+ * What determines a collection's result. The source tab is part of it: it decides the browser
+ * profile (incognito or not), and the popup and the preview it opens share it.
+ */
+export function collectKey(request: ExportRequest): string {
+  return JSON.stringify([
+    siteKey(request.site),
+    request.sourceTabId ?? null,
+    request.mode,
+    request.root.id,
+    request.root.type,
+    request.depth ?? null,
+    request.linkDepth ?? null,
+    request.mode === 'selection' ? (request.selectedIds ?? []) : null,
+    !!request.options?.includeArchived,
+  ]);
+}
+
+/**
+ * Resolves the page list for the preview (blocked spaces removed). The collection runs in the
+ * site's helper tab as a background operation (no event stays pending for minutes); progress
+ * and throttling are reported through `onUpdate`, `signal` cancels it. A result collected
+ * moments ago for the same request (the popup's page count) is reused.
+ */
 export async function collectForPreview(
   request: ExportRequest,
-  nearTabId?: number,
+  o: {
+    requestId: string;
+    signal: AbortSignal;
+    onUpdate?: (u: { message?: string; throttledForMs?: number }) => void;
+  },
 ): Promise<{ pages: PageRef[]; warnings: string[] }> {
   await init();
   validateRequest(request);
   await requireAccess(request.site);
   const policy = await loadPolicy();
   if (isBlockedSpace(request.root.spaceKey, policy)) throw blockedError();
-  const res = await withPreviewTab(request.site, nearTabId ?? request.sourceTabId, (tabId) =>
-    callWorker(tabId, { type: 'worker/collect', request }),
-  );
+
+  const key = collectKey(request);
+  for (const [k, v] of collectCache) if (Date.now() - v.at > COLLECT_CACHE_TTL_MS) collectCache.delete(k);
+  let res = collectCache.get(key)?.result;
+  if (!res) {
+    const unsubscribe = subscribeWorker(o.requestId, (m) => {
+      if (m.type === 'worker/progress') o.onUpdate?.({ message: m.current });
+      else if (m.type === 'worker/throttled') o.onUpdate?.({ throttledForMs: m.retryInMs });
+    });
+    try {
+      // The source tab decides the profile (incognito or not) of the helper tab.
+      res = await withPreviewTab(request.site, request.sourceTabId, async (tabId) => {
+        try {
+          return await runWorkerOp(
+            { callWorker, subscribeWorker },
+            {
+              tabId,
+              id: o.requestId,
+              op: 'collect',
+              msg: {
+                type: 'worker/collect',
+                jobId: o.requestId,
+                request,
+                maxItems: policy.maxPages ? policy.maxPages + 1 : undefined,
+                transient: true,
+              },
+              signal: o.signal,
+            },
+          );
+        } catch (e) {
+          if (o.signal.aborted) callWorker(tabId, { type: 'worker/cancel', jobId: o.requestId }).catch(() => undefined);
+          throw e;
+        }
+      });
+    } finally {
+      unsubscribe();
+    }
+    collectCache.set(key, { at: Date.now(), result: res });
+  }
+
   const filtered = applyPolicyToPages(res.pages, policy, request.root.spaceKey);
   const warnings = [...res.warnings];
-  if (filtered.errors.length) {
-    const n = filtered.errors.length;
-    warnings.push(`${n} page${n === 1 ? ' is' : 's are'} in spaces blocked by your administrator and will be left out.`);
+  const blocked = filtered.errors.filter((e) => e.message === BLOCKED_MESSAGE).length;
+  const unverified = filtered.errors.length - blocked;
+  if (blocked) {
+    warnings.push(`${blocked} page${blocked === 1 ? ' is' : 's are'} in spaces blocked by your administrator and will be left out.`);
+  }
+  if (unverified) {
+    warnings.push(
+      `${unverified} linked page${unverified === 1 ? '' : 's'} will be left out: ${unverified === 1 ? 'its space' : 'their spaces'} could not be checked against your administrator's policy.`,
+    );
   }
   return { pages: filtered.pages, warnings };
 }
 
+function postToPort(port: chrome.runtime.Port, event: UiPortEvent): void {
+  try {
+    port.postMessage(event);
+  } catch {
+    /* the page went away */
+  }
+}
+
+/**
+ * A popup / preview page connected (`UI_PORT_NAME`). Collections run over this port; when the
+ * page goes away (closed, navigated) its collections are cancelled and, once no extension page
+ * is left, idle helper tabs are closed.
+ */
+export function handleUiPort(port: chrome.runtime.Port): void {
+  uiPorts.add(port);
+  const owned = new Set<string>();
+  port.onMessage.addListener((raw: unknown) => {
+    const msg = raw as UiPortRequest | null;
+    if (!msg || typeof msg !== 'object' || typeof msg.requestId !== 'string') return;
+    if (msg.type === 'collect/cancel') {
+      if (owned.has(msg.requestId)) activeCollects.get(msg.requestId)?.controller.abort();
+      return;
+    }
+    if (msg.type !== 'collect/start' || activeCollects.has(msg.requestId)) return;
+    const { requestId } = msg;
+    const controller = new AbortController();
+    activeCollects.set(requestId, { controller });
+    owned.add(requestId);
+    updateKeepAlive();
+    collectForPreview(msg.request, {
+      requestId,
+      signal: controller.signal,
+      onUpdate: (u) => postToPort(port, { type: 'collect/progress', requestId, ...u }),
+    })
+      .then(
+        (result) => postToPort(port, { type: 'collect/done', requestId, result }),
+        (e: unknown) => {
+          const err = e as { message?: unknown; code?: unknown } | null;
+          postToPort(port, {
+            type: 'collect/failed',
+            requestId,
+            error: typeof err?.message === 'string' ? err.message : String(e),
+            code: controller.signal.aborted ? 'ABORTED' : typeof err?.code === 'string' ? err.code : undefined,
+          });
+        },
+      )
+      .finally(() => {
+        activeCollects.delete(requestId);
+        owned.delete(requestId);
+        updateKeepAlive();
+      });
+  });
+  port.onDisconnect.addListener(() => {
+    void chrome.runtime.lastError;
+    uiPorts.delete(port);
+    for (const id of owned) activeCollects.get(id)?.controller.abort();
+    if (uiPorts.size === 0) closeIdlePreviewTabsSoon();
+  });
+}
+
 /** UiToSw 'tree/children': lazy tree for the manual picker. */
 export async function treeChildren(
-  msg: { site: SiteInfo; spaceKey: string; spaceId?: string; parent?: { id: string; type: TreeNode['type'] } },
+  msg: {
+    site: SiteInfo;
+    spaceKey: string;
+    spaceId?: string;
+    parent?: { id: string; type: TreeNode['type'] };
+    sourceTabId?: number;
+  },
   nearTabId?: number,
 ): Promise<TreeNode[]> {
   await init();
   await requireAccess(msg.site);
   const policy = await loadPolicy();
   if (isBlockedSpace(msg.spaceKey, policy)) throw blockedError();
-  return withPreviewTab(msg.site, nearTabId, (tabId) =>
+  // The source tab decides the profile (incognito or not) of the helper tab.
+  return withPreviewTab(msg.site, msg.sourceTabId ?? nearTabId, (tabId) =>
     callWorker(tabId, {
       type: 'worker/children',
       site: msg.site,
@@ -458,13 +641,8 @@ export async function resolveContentUrl(site: SiteInfo, url: string, nearTabId?:
   return withPreviewTab(site, nearTabId, (tabId) => callWorker(tabId, { type: 'worker/resolve', site, url }));
 }
 
-async function countPdfPages(pdf: Uint8Array): Promise<number> {
-  const doc = await PDFDocument.load(pdf, { ignoreEncryption: true, updateMetadata: false });
-  return doc.getPageCount();
-}
-
 async function fallbackPrint(tabId: number): Promise<void> {
-  // The tab now belongs to the user: it must survive orphan cleanup.
+  // The tab now belongs to the user: it must survive orphan cleanup (the list and the URL marker).
   await unregisterOrphan(tabId);
   const tab = await chrome.tabs.update(tabId, { active: true });
   if (tab?.windowId !== undefined) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
@@ -472,8 +650,20 @@ async function fallbackPrint(tabId: number): Promise<void> {
     target: { tabId },
     // Deferred so executeScript returns instead of blocking until the dialog closes.
     func: () => {
+      history.replaceState(null, '', location.pathname + location.search);
       setTimeout(() => window.print(), 150);
     },
+  });
+}
+
+/** Compact page list for the checkpoint (no breadcrumbs or other bulky fields). */
+function compactPages(pages: PageRef[]): PageRef[] {
+  return pages.map((p) => {
+    const c: PageRef = { id: p.id, type: p.type, title: p.title, depth: p.depth, url: p.url, reason: p.reason };
+    if (p.spaceKey) c.spaceKey = p.spaceKey;
+    if (p.spaceId) c.spaceId = p.spaceId;
+    if (p.parentId) c.parentId = p.parentId;
+    return c;
   });
 }
 
@@ -481,10 +671,17 @@ function buildDeps(job: ExportJobState, signal: AbortSignal, settings: Settings,
   return {
     callWorker: (tabId, msg) => callWorker(tabId, msg as SwToWorker) as never,
     subscribeWorker,
-    openWorkerTab: async (site, nearTabId) => (await takePreviewTab(site)) ?? openWorkerTab(site, nearTabId),
+    openWorkerTab: async (site, nearTabId, s) => {
+      const taken = await takePreviewTab(site, nearTabId);
+      if (taken !== undefined && s?.aborted) {
+        await closeTabQuietly(taken);
+        throw new DOMException('The export was cancelled.', 'AbortError');
+      }
+      return taken ?? openWorkerTab(site, nearTabId, s);
+    },
     closeTabQuietly,
     toPrintParams,
-    printTabToPdf: (tabId, params, s) => printTabToPdf(tabId, params, s),
+    printSession: (tabId, s) => createPrintSession(tabId, s),
     isDebuggerUnavailable: (e) =>
       e instanceof DebuggerUnavailableError || (e as { name?: string } | null)?.name === 'DebuggerUnavailableError',
     // Detaching everything would break other jobs that are printing right now.
@@ -492,13 +689,13 @@ function buildDeps(job: ExportJobState, signal: AbortSignal, settings: Settings,
     fallbackPrint,
     liveRenderPages,
     concatPdfs,
-    findSectionStartPages,
+    finalizeExport,
     finalizePdf,
-    buildOutline,
-    readOutline,
-    countPdfPages,
     zipFiles,
     saveBytes,
+    saveCheckpoint: (j) => {
+      store.saveCheckpoint(j.id, { request: j.request, pages: compactPages(j.pages) }).catch(() => undefined);
+    },
     settings,
     policy,
     version: chrome.runtime.getManifest().version,
@@ -509,7 +706,7 @@ function buildDeps(job: ExportJobState, signal: AbortSignal, settings: Settings,
 }
 
 /** UiToSw 'job/start'. Validates, applies the managed policy and runs the job in the background. */
-export async function startJob(request: ExportRequest, pages?: PageRef[]): Promise<string> {
+export async function startJob(request: ExportRequest, pages?: PageRef[], startKey?: number): Promise<string> {
   await init();
   validateRequest(request);
   await requireAccess(request.site);
@@ -530,11 +727,13 @@ export async function startJob(request: ExportRequest, pages?: PageRef[]): Promi
     id: crypto.randomUUID(),
     request: { ...request, options },
     pages: initialPages,
+    pageCount: initialPages.length || undefined,
     status: 'collecting',
     message: 'Starting',
     progress: { done: 0, total: 0 },
     errors: [],
     createdAt: Date.now(),
+    ...(startKey !== undefined ? { startKey } : {}),
   };
   const controller = new AbortController();
   const entry: RunningJob = { job, controller, settings, done: Promise.resolve() };
@@ -555,6 +754,42 @@ export async function startJob(request: ExportRequest, pages?: PageRef[]): Promi
   return job.id;
 }
 
+// ───────────────────────────── start after a permission grant ─────────────────────────────
+
+/** Pending starts claimed by this service worker, keyed by their `createdAt`. */
+const pendingClaims = new Map<number, Promise<string>>();
+
+/**
+ * Starts a pending export (popup permission hand-off) exactly once. `permissions.onAdded` and
+ * the popup's `job/claimPending` both come here; the claim is registered synchronously, before
+ * any await, so whichever arrives second gets the first one's job.
+ */
+export function claimPendingStart(pending: PendingStartPayload): Promise<string> {
+  const key = pending.createdAt;
+  let claim = pendingClaims.get(key);
+  if (!claim) {
+    claim = (async () => {
+      store.clearPendingStart().catch(() => undefined);
+      // A previous service-worker instance may already have started it.
+      const existing = (await listJobs()).find((j) => j.startKey === key);
+      if (existing) return existing.id;
+      return startJob(pending.request, pending.pages, key);
+    })();
+    pendingClaims.set(key, claim);
+    claim.catch(() => pendingClaims.delete(key));
+    setTimeout(() => pendingClaims.delete(key), store.PENDING_START_TTL_MS);
+  }
+  return claim;
+}
+
+/** UiToSw 'job/retry': start an interrupted export again with its stored page list. */
+export async function retryJob(jobId: string): Promise<string> {
+  await init();
+  const checkpoint = await store.loadCheckpoint(jobId).catch(() => null);
+  if (!checkpoint) throw codedError('The page list of this export is no longer available. Start a new export.', 'NOT_FOUND');
+  return startJob(checkpoint.request, checkpoint.pages);
+}
+
 async function onJobFinished(entry: RunningJob): Promise<void> {
   const { job } = entry;
   running.delete(job.id);
@@ -568,6 +803,8 @@ async function onJobFinished(entry: RunningJob): Promise<void> {
   if (timer) clearTimeout(timer);
   pendingBroadcast.delete(job.id);
   lastBroadcast.delete(job.id);
+  // The checkpoint only serves an interrupted export; this one ended normally.
+  await store.deleteCheckpoint(job.id).catch(() => undefined);
   await store.pruneJobs(store.MAX_STORED_JOBS, running.keys()).catch(() => undefined);
   await notify(job, entry.settings);
 }
@@ -580,6 +817,7 @@ export async function cancelJob(jobId: string): Promise<void> {
   await Promise.race([entry.done, new Promise((r) => setTimeout(r, CANCEL_WAIT_MS))]);
 }
 
+/** Full job (with its page list) while this service worker knows it; a slim snapshot otherwise. */
 export async function getJob(jobId: string): Promise<ExportJobState | null> {
   const live = running.get(jobId)?.job ?? finished.get(jobId);
   if (live) return snapshot(live);
@@ -590,7 +828,7 @@ export async function getJob(jobId: string): Promise<ExportJobState | null> {
   }
 }
 
-/** Most recent jobs, newest first. */
+/** Most recent jobs, newest first (slim snapshots, without page lists). */
 export async function listJobs(): Promise<ExportJobState[]> {
   let stored: ExportJobState[] = [];
   try {
@@ -599,7 +837,7 @@ export async function listJobs(): Promise<ExportJobState[]> {
     stored = [];
   }
   const byId = new Map(stored.map((j) => [j.id, j]));
-  for (const j of [...finished.values(), ...[...running.values()].map((r) => r.job)]) byId.set(j.id, snapshot(j));
+  for (const j of [...finished.values(), ...[...running.values()].map((r) => r.job)]) byId.set(j.id, slimJob(j));
   return [...byId.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, store.MAX_STORED_JOBS);
 }
 

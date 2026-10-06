@@ -2,14 +2,18 @@
  * Pure, DOM-free helpers shared by the popup, preview and options pages.
  * Kept free of chrome.* and Preact so they can be unit tested in isolation.
  */
+import { jobPercent } from '../lib/job/progress';
 import type {
   ContentType,
   ExportJobState,
   ExportOptions,
+  JobError,
   JobStatus,
   PageRef,
   TreeNode,
 } from '../lib/types';
+
+export { jobPercent };
 
 // ───────────────────────────── margins ─────────────────────────────
 
@@ -117,12 +121,42 @@ export function statusLabel(job: Pick<ExportJobState, 'status' | 'message'>): st
   }
 }
 
-/** 0..1, or null when the total is not known yet. */
+/**
+ * Overall progress 0..1 across all phases (never jumps back when a phase starts counting from 0),
+ * or null while collecting (indeterminate).
+ */
 export function jobFraction(job: Pick<ExportJobState, 'status' | 'progress'>): number | null {
   if (job.status === 'done') return 1;
-  const { done, total } = job.progress;
+  if (job.status === 'collecting') return null;
+  return jobPercent(job) / 100;
+}
+
+/** "Page 3 of 25" while pages are being counted; null for other work (print batches, saving). */
+export function progressCount(job: Pick<ExportJobState, 'status' | 'progress'>): string | null {
+  const { done, total, unit } = job.progress;
   if (!total || total <= 0) return null;
-  return Math.min(1, Math.max(0, done / total));
+  const pages = unit ? unit === 'page' : job.status === 'fetching';
+  if (!pages) return null;
+  return `Page ${Math.min(done, total).toLocaleString()} of ${total.toLocaleString()}`;
+}
+
+/** Number of pages of a job (snapshots carry `pageCount` instead of the page list). */
+export function jobPageCount(job: Pick<ExportJobState, 'pages' | 'pageCount'>): number {
+  return job.pageCount ?? job.pages.length;
+}
+
+/**
+ * Error summary rows: problems of individual pages (skipped / partial). Fatal errors are shown in
+ * the error notice instead, and image failures as one line of their own.
+ */
+export function summarizeProblems(errors: readonly JobError[]): {
+  rows: JobError[];
+  pageCount: number;
+  imageNote: string | null;
+} {
+  const rows = errors.filter((e) => e.severity !== 'fatal' && e.pageId);
+  const imageNote = errors.find((e) => e.severity !== 'fatal' && !e.pageId)?.message ?? null;
+  return { rows, pageCount: new Set(rows.map((e) => e.pageId)).size, imageNote };
 }
 
 // ───────────────────────────── formatting ─────────────────────────────
@@ -163,11 +197,25 @@ export function isLinkOnlyType(t: ContentType): boolean {
 
 export type GuardLevel = 'none' | 'empty' | 'warn' | 'confirm' | 'blocked';
 
+/** Rows that count as pages for the FR-16 guard: folders are only section headers. */
+export function exportableCount(pages: readonly Pick<PageRef, 'type'>[]): number {
+  return pages.filter((p) => p.type !== 'folder').length;
+}
+
 export function largeExportGuard(
   count: number,
   limits: { warn: number; confirm: number; max?: number },
+  /** Folders selected but no page: explain why there is nothing to export. */
+  onlyFolders = false,
 ): { level: GuardLevel; message: string } {
-  if (count <= 0) return { level: 'empty', message: 'Select at least one page to export.' };
+  if (count <= 0) {
+    return {
+      level: 'empty',
+      message: onlyFolders
+        ? 'Only folders are selected, and they have no pages to export.'
+        : 'Select at least one page to export.',
+    };
+  }
   if (limits.max !== undefined && limits.max > 0 && count > limits.max) {
     return {
       level: 'blocked',

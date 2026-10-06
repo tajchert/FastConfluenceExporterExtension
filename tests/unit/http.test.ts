@@ -229,3 +229,60 @@ describe('paginate', () => {
     expect(calls).toHaveLength(1);
   });
 });
+
+describe('request timeouts', () => {
+  it('turns a request that never answers into HttpError(0) "timed out" instead of hanging', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init: RequestInit = {}) => {
+        calls.push(String(input));
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+      }),
+    );
+    const err = await getJson('https://acme.atlassian.net/wiki/api/v2/pages/1', { timeoutMs: 20, maxRetries: 0 }).catch((e) => e);
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(0);
+    expect((err as HttpError).message).toMatch(/timed out/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('retries a timed-out attempt once, then succeeds', async () => {
+    let n = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_input: RequestInfo | URL, init: RequestInit = {}) => {
+        n++;
+        if (n === 1) {
+          return new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+          });
+        }
+        return Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+      }),
+    );
+    vi.useFakeTimers();
+    const p = getJson('https://acme.atlassian.net/wiki/api/v2/pages/1', { timeoutMs: 50 });
+    await vi.advanceTimersByTimeAsync(60); // attempt 1 times out
+    await vi.advanceTimersByTimeAsync(2000); // back-off
+    await expect(p).resolves.toEqual({ ok: true });
+    expect(n).toBe(2);
+  });
+
+  it('a cancel is an AbortError, not a timeout', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_input: RequestInfo | URL, init: RequestInit = {}) => {
+        return new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+      }),
+    );
+    const ac = new AbortController();
+    const p = getJson('https://acme.atlassian.net/wiki/api/v2/pages/1', { signal: ac.signal, timeoutMs: 10_000 });
+    ac.abort();
+    await expect(p).rejects.toSatisfy(isAbortError);
+  });
+});

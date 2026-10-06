@@ -5,18 +5,15 @@
  *
  *   collecting → fetching → rendering → merging → done | error | cancelled
  */
-import type {
-  CoverInfo,
-  SwToWorker,
-  SwToWorkerResponses,
-  WorkerToSw,
-} from '../messages';
+import type { CoverInfo, SwToWorker, SwToWorkerResponses, WorkerOp, WorkerOpResults, WorkerToSw } from '../messages';
 import { effectiveMarginsMm } from '../assemble/geometry';
-import type { FinalizeOptions, OutlineItem, PdfMetadata } from '../pdf/merge';
+import { contentUrl } from '../confluence/url';
+import type { ExportFinalizeOptions, ExportFinalizeResult, FinalizeOptions, PdfMetadata } from '../pdf/merge';
 import type { PrintParams } from '../render/cdp';
 import type {
   ExportJobState,
   ExportOptions,
+  ExportRequest,
   FetchedPageInfo,
   JobError,
   ManagedPolicy,
@@ -25,9 +22,13 @@ import type {
   SiteInfo,
 } from '../types';
 import { buildFilename, sanitizeFilenamePart } from '../util/filename';
+import { runWorkerOp } from './workerOp';
 
 export const PRODUCT_NAME = 'Fast PDF Export for Confluence';
 export const BLOCKED_MESSAGE = 'Blocked by your administrator';
+/** A linked page whose space is unknown cannot be checked against blocked spaces: fail closed. */
+export const UNVERIFIED_SPACE_MESSAGE = "This page's space could not be checked against your administrator's policy.";
+export const SAVING_MESSAGE = 'Saving… (choose a location if Chrome asks)';
 
 const LINK_ONLY_TYPES = new Set(['folder', 'whiteboard', 'database', 'embed']);
 const WORKER_CLEANUP_TIMEOUT_MS = 800;
@@ -41,31 +42,40 @@ export interface LiveRenderOpts {
   nearTabId?: number;
 }
 
+/** A debugger session on the worker tab (lib/render/cdp.ts createPrintSession). */
+export interface RunnerPrintSession {
+  print(params: PrintParams): Promise<Uint8Array>;
+  close(): Promise<void>;
+}
+
 export interface RunnerDeps {
   /** Typed RPC to the worker tab (lib/rpc.ts callWorker). */
   callWorker<M extends SwToWorker>(tabId: number, msg: M): Promise<SwToWorkerResponses[M['type']]>;
-  /** Receive `worker/progress` / `worker/throttled` notifications for a job. Returns unsubscribe. */
+  /** Receive `worker/progress` / `worker/throttled` / `worker/done` notifications for a job. Returns unsubscribe. */
   subscribeWorker(jobId: string, listener: (msg: WorkerToSw) => void): () => void;
-  openWorkerTab(site: SiteInfo, nearTabId?: number): Promise<number>;
+  /** Opens (or takes over) a worker tab; closes it itself when `signal` aborts while opening. */
+  openWorkerTab(site: SiteInfo, nearTabId?: number, signal?: AbortSignal): Promise<number>;
   closeTabQuietly(tabId: number | undefined): Promise<void>;
   toPrintParams(options: ExportOptions): PrintParams;
-  printTabToPdf(tabId: number, params: PrintParams, signal?: AbortSignal): Promise<Uint8Array>;
+  /** Attaches the debugger once for all prints of the job (one infobar), detached on close(). */
+  printSession(tabId: number, signal: AbortSignal): RunnerPrintSession;
   isDebuggerUnavailable(e: unknown): boolean;
   /** Detach stale debugger sessions after a cancel. */
   detachAll(): Promise<void>;
   /** Debugger fallback: show the worker tab and open the system print dialog on it. */
   fallbackPrint(tabId: number): Promise<void>;
   liveRenderPages(pages: PageRef[], o: LiveRenderOpts): Promise<Map<string, Uint8Array | Error>>;
-  concatPdfs(parts: Uint8Array[]): Promise<{ bytes: Uint8Array; offsets: number[] }>;
-  /** First sheet of every page section, keyed by page id (named destinations `p-{id}`). */
-  findSectionStartPages(pdf: Uint8Array, pages: { id: string; title: string }[]): Promise<Map<string, number>>;
+  /** Merges print batches; `owner(name)` = the batch holding the real target of a named destination. */
+  concatPdfs(parts: Uint8Array[], owner?: (name: string) => number | undefined): Promise<{ bytes: Uint8Array; offsets: number[] }>;
+  /** The combined PDF: live inserts, page-tree bookmarks, page numbers, metadata (one parse). */
+  finalizeExport(base: Uint8Array, o: ExportFinalizeOptions): Promise<ExportFinalizeResult>;
+  /** Metadata for one-page documents (separate files). */
   finalizePdf(base: Uint8Array, o: FinalizeOptions): Promise<{ bytes: Uint8Array; pageCount: number }>;
-  buildOutline(pages: PageRef[], startPage: Map<string, number>): OutlineItem[];
-  /** Outline (bookmarks) already present in a PDF — Chrome's, or the merged one of concatPdfs. */
-  readOutline(pdf: Uint8Array): Promise<OutlineItem[]>;
-  countPdfPages(pdf: Uint8Array): Promise<number>;
-  zipFiles(files: { name: string; data: Uint8Array }[]): Uint8Array;
-  saveBytes(bytes: Uint8Array, filename: string, mime: string): Promise<number>;
+  zipFiles(files: { name: string; data: Uint8Array }[], signal?: AbortSignal): Promise<Uint8Array>;
+  /** Saves the file; aborting `signal` cancels the download too. */
+  saveBytes(bytes: Uint8Array, filename: string, mime: string, signal?: AbortSignal): Promise<number>;
+  /** Stores the request and page list once, so an interrupted export can be started again. */
+  saveCheckpoint?(job: ExportJobState): void;
   settings: Settings;
   policy: ManagedPolicy;
   /** Extension version (chrome.runtime.getManifest().version). */
@@ -73,6 +83,8 @@ export interface RunnerDeps {
   now(): number;
   signal: AbortSignal;
   onUpdate(job: ExportJobState): void;
+  /** Liveness ping interval while a background worker operation runs (tests shorten it). */
+  workerPingMs?: number;
 }
 
 // ───────────────────────────── pure helpers (exported for the manager and tests) ─────────────
@@ -143,8 +155,18 @@ export function isBlockedSpace(spaceKey: string | undefined, policy: ManagedPoli
 }
 
 /**
+ * With a block list, a linked page (it may come from any space) whose space key is unknown
+ * cannot be checked: it is left out instead of being exported (fail closed). Pages of the same
+ * tree (root/descendant/selected) inherit the root's space, which was checked already.
+ */
+export function isUnverifiableSpace(ref: Pick<PageRef, 'reason'>, spaceKey: string | undefined, policy: ManagedPolicy): boolean {
+  return !!policy.blockedSpaceKeys?.length && ref.reason === 'linked' && !spaceKey;
+}
+
+/**
  * Drops pages in spaces blocked by the managed policy. Pages without a space key inherit the
- * export root's space when they come from the same tree (root/descendant/selected).
+ * export root's space when they come from the same tree (root/descendant/selected); linked pages
+ * without one are dropped (see isUnverifiableSpace).
  */
 export function applyPolicyToPages(
   pages: PageRef[],
@@ -158,6 +180,8 @@ export function applyPolicyToPages(
     const key = p.spaceKey ?? (p.reason === 'linked' ? undefined : rootSpaceKey);
     if (isBlockedSpace(key, policy)) {
       errors.push({ pageId: p.id, title: p.title, message: BLOCKED_MESSAGE, severity: 'skipped' });
+    } else if (isUnverifiableSpace(p, key, policy)) {
+      errors.push({ pageId: p.id, title: p.title, message: UNVERIFIED_SPACE_MESSAGE, severity: 'skipped' });
     } else {
       kept.push(p);
     }
@@ -182,6 +206,7 @@ function friendlyFetchError(info: FetchedPageInfo): string {
   if (info.error) return info.error;
   switch (info.httpStatus) {
     case 401:
+      return 'Your Confluence session has expired or you are not signed in. Sign in to Confluence and try again.';
     case 403:
       return 'You do not have permission to view this page.';
     case 404:
@@ -191,11 +216,28 @@ function friendlyFetchError(info: FetchedPageInfo): string {
   }
 }
 
-/** Page start sheet after inserting `inserts` (each adds `count` sheets after `afterPageIndex`). */
-export function shiftStartPage(start: number, inserts: { afterPageIndex: number; count: number }[]): number {
-  let shifted = start;
-  for (const ins of inserts) if (ins.afterPageIndex < start) shifted += ins.count;
-  return shifted;
+/**
+ * "This page" exports need no collection: the request already names the page (the fetch then
+ * checks it exists and fills in its title and space).
+ */
+export function currentPageRef(request: ExportRequest): PageRef {
+  const r = request.root;
+  const ref: PageRef = {
+    id: r.id,
+    type: r.type,
+    title: r.title ?? '',
+    depth: 0,
+    reason: 'root',
+    url: contentUrl(request.site, { id: r.id, type: r.type, spaceKey: r.spaceKey }),
+  };
+  if (r.spaceKey) ref.spaceKey = r.spaceKey;
+  if (r.spaceId) ref.spaceId = r.spaceId;
+  return ref;
+}
+
+/** Page id behind a named destination: `p-{id}` (section) or `p{id}-…` (heading in that page). */
+export function destinationPageId(name: string): string | undefined {
+  return /^p-(.+)$/.exec(name)?.[1] ?? /^p([^-]+)-/.exec(name)?.[1];
 }
 
 function plural(n: number, word: string): string {
@@ -210,6 +252,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
   const options = request.options;
   let tabId: number | undefined;
   let keepTab = false;
+  let session: RunnerPrintSession | undefined;
 
   const update = (patch: Partial<ExportJobState> = {}) => {
     Object.assign(job, patch);
@@ -222,6 +265,14 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
     if (tabId === undefined) return Promise.reject(new Error('The export tab is not open.'));
     return abortable(deps.callWorker(tabId, msg), signal);
   };
+  /** Long worker operations run in the background (no message stays pending for minutes). */
+  const workerOp = <O extends WorkerOp>(
+    op: O,
+    msg: Extract<SwToWorker, { type: 'worker/collect' | 'worker/fetch' }>,
+  ): Promise<WorkerOpResults[O]> => {
+    if (tabId === undefined) return Promise.reject(new Error('The export tab is not open.'));
+    return runWorkerOp(deps, { tabId, id: job.id, op, msg, signal, pingMs: deps.workerPingMs });
+  };
 
   const unsubscribe = deps.subscribeWorker(job.id, (msg) => {
     if (msg.type === 'worker/throttled') {
@@ -232,7 +283,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
         update({
           throttled: false,
           message: 'Fetching pages',
-          progress: { done: msg.done, total: msg.total, current: msg.current },
+          progress: { done: msg.done, total: msg.total, current: msg.current, unit: 'page' },
         });
       } else if (job.status === 'collecting') {
         update({ throttled: false, progress: { ...job.progress, current: msg.current } });
@@ -244,16 +295,33 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
     check();
     // ── 3. worker tab ──
     update({ status: 'collecting', message: 'Connecting to Confluence', progress: { done: 0, total: 0 } });
-    tabId = await abortable(deps.openWorkerTab(request.site, request.sourceTabId), signal);
+    const opening = deps.openWorkerTab(request.site, request.sourceTabId, signal);
+    try {
+      tabId = await abortable(opening, signal);
+    } catch (e) {
+      // Cancelled while the tab was still opening: whoever finishes opening it, it gets closed.
+      if (isAbort(e, signal)) opening.then((id) => deps.closeTabQuietly(id), () => undefined);
+      throw e;
+    }
     check();
 
-    // ── 4. collect (skipped when the preview already supplied the page list) ──
+    // ── 4. collect (skipped when the preview supplied the page list, or for a single page) ──
     let pages = job.pages;
     if (!pages.length) {
-      update({ message: 'Collecting pages' });
-      const res = await worker({ type: 'worker/collect', jobId: job.id, request });
-      pages = res.pages;
-      if (res.warnings.length) job.warnings = [...(job.warnings ?? []), ...res.warnings];
+      if (request.mode === 'current') {
+        pages = [currentPageRef(request)];
+      } else {
+        update({ message: 'Collecting pages' });
+        const res = await workerOp('collect', {
+          type: 'worker/collect',
+          jobId: job.id,
+          request,
+          // Enough to report the administrator's limit without collecting far beyond it.
+          maxItems: deps.policy.maxPages ? deps.policy.maxPages + 1 : undefined,
+        });
+        pages = res.pages;
+        if (res.warnings.length) job.warnings = [...(job.warnings ?? []), ...res.warnings];
+      }
     }
     const filtered = applyPolicyToPages(pages, deps.policy, request.root.spaceKey);
     pages = filtered.pages;
@@ -263,13 +331,14 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
     if (!pages.length) {
       throw new Error(filtered.errors.length ? 'All pages are in spaces blocked by your administrator.' : 'There is nothing to export.');
     }
-    update({ pages });
+    update({ pages, pageCount: pages.length });
+    deps.saveCheckpoint?.(job);
     check();
 
     // ── 6. fetch ──
-    update({ status: 'fetching', message: 'Fetching pages', progress: { done: 0, total: pages.length } });
+    update({ status: 'fetching', message: 'Fetching pages', progress: { done: 0, total: pages.length, unit: 'page' } });
     const liveRequested = options.liveRender && !deps.policy.disableLiveRender;
-    const { results } = await worker({
+    const { results } = await workerOp('fetch', {
       type: 'worker/fetch',
       jobId: job.id,
       site: request.site,
@@ -283,12 +352,20 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
     const included: PageRef[] = [];
     for (const ref of pages) {
       const info = infoById.get(ref.id);
+      if (info?.ok) {
+        // Refs built without a title or space (single-page exports) get them from Confluence.
+        if (!ref.title && info.title) ref.title = info.title;
+        if (!ref.spaceKey && info.spaceKey) ref.spaceKey = info.spaceKey;
+      }
+      const spaceKey = info?.spaceKey ?? ref.spaceKey;
       if (!info) {
         job.errors.push({ pageId: ref.id, title: ref.title, message: 'The page could not be loaded.', severity: 'skipped' });
       } else if (!info.ok) {
         job.errors.push({ pageId: ref.id, title: ref.title, message: friendlyFetchError(info), severity: 'skipped' });
-      } else if (isBlockedSpace(info.spaceKey, deps.policy)) {
+      } else if (isBlockedSpace(spaceKey, deps.policy)) {
         job.errors.push({ pageId: ref.id, title: ref.title, message: BLOCKED_MESSAGE, severity: 'skipped' });
+      } else if (isUnverifiableSpace(ref, spaceKey, deps.policy)) {
+        job.errors.push({ pageId: ref.id, title: ref.title, message: UNVERIFIED_SPACE_MESSAGE, severity: 'skipped' });
       } else {
         included.push(ref);
       }
@@ -304,7 +381,15 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
           : `None of the ${n} pages could be exported${first ? ` (${first.message})` : ''}.`,
       );
     }
-    update({ progress: { done: pages.length, total: pages.length } });
+    // Only folders (no page, blog post, whiteboard, database or embed): nothing worth a PDF.
+    if (included.every((p) => p.type === 'folder')) {
+      throw new Error(
+        request.mode === 'folder' ? 'This folder has no pages you can export.' : 'The selection has no pages you can export.',
+      );
+    }
+    const includedIds = new Set(included.map((p) => p.id));
+    const excludeIds = pages.filter((p) => !includedIds.has(p.id)).map((p) => p.id);
+    update({ pages, progress: { done: pages.length, total: pages.length, unit: 'page' } });
 
     // ── shared output details ──
     const rootRef = included.find((p) => p.id === request.root.id) ?? pages.find((p) => p.id === request.root.id);
@@ -341,7 +426,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
       update({
         status: 'rendering',
         message: `Rendering diagrams 0/${liveCandidates.length}`,
-        progress: { done: 0, total: liveCandidates.length },
+        progress: { done: 0, total: liveCandidates.length, unit: 'page' },
       });
       let results: Map<string, Uint8Array | Error>;
       try {
@@ -358,7 +443,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
             onProgress: (done, current) =>
               update({
                 message: `Rendering diagrams ${done}/${liveCandidates.length}`,
-                progress: { done, total: liveCandidates.length, current },
+                progress: { done, total: liveCandidates.length, current, unit: 'page' },
               }),
           }),
           signal,
@@ -397,21 +482,26 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
       : null;
     const params = deps.toPrintParams(options);
     const batches = chunk(included, settings.printBatchSize);
-    // Chrome numbers each print on its own: with several batches or inserted live pages the
-    // footer would be wrong, so print without it and stamp "n / total" on the final document.
-    const stampNumbers = options.pageNumbers && !options.separateFiles && (batches.length > 1 || livePdfs.size > 0);
+    // Chrome's footer numbers each print on its own and cannot skip the cover: with several
+    // batches, inserted live pages or a cover, print without it and stamp "n / total" on the
+    // final document instead (the cover unnumbered, numbering starting on the next sheet).
+    const stampNumbers =
+      options.pageNumbers && !options.separateFiles && (batches.length > 1 || livePdfs.size > 0 || !!cover);
     const batchParams: PrintParams = stampNumbers ? { ...params, displayHeaderFooter: false } : params;
 
     /** Debugger blocked: assemble everything into the worker tab and open the print dialog. */
     const fallbackToPrintDialog = async () => {
-      update({ status: 'rendering', message: 'Opening the print dialog', progress: { done: 0, total: 1 } });
+      await session?.close();
+      session = undefined;
+      update({ status: 'rendering', message: 'Opening the print dialog', progress: { done: 0, total: 1, unit: 'step' } });
       await worker({
         type: 'worker/assemble',
         jobId: job.id,
         site: request.site,
         pageIds: (options.separateFiles ? includedContent : included).map((p) => p.id),
         liveRenderIds: [],
-        allPages: included,
+        allPages: pages,
+        excludeIds,
         options,
         cover,
         toc: options.includeToc,
@@ -423,7 +513,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
         status: 'done',
         printDialog: true,
         finishedAt: deps.now(),
-        progress: { done: 1, total: 1 },
+        progress: { done: 1, total: 1, unit: 'step' },
         message:
           "Chrome's debugger is not available (it may be blocked by your administrator or in use by DevTools or another extension), " +
           'so the system print dialog was opened instead. Choose "Save as PDF" as the destination.',
@@ -431,8 +521,9 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
     };
 
     const print = async (p: PrintParams = params): Promise<Uint8Array | null> => {
+      session ??= deps.printSession(tabId!, signal);
       try {
-        return await deps.printTabToPdf(tabId!, p, signal);
+        return await session.print(p);
       } catch (e) {
         if (isAbort(e, signal)) throw e;
         if (deps.isDebuggerUnavailable(e)) return null;
@@ -456,7 +547,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
       update({
         status: 'done',
         finishedAt: deps.now(),
-        progress: { done: job.progress.total, total: job.progress.total },
+        progress: { done: 1, total: 1, unit: 'step' },
         result: { filename, downloadId, bytes, pageCount, sheetCount },
         message: skipped ? `Saved ${filename} (${plural(skipped, 'page')} skipped)` : `Saved ${filename}`,
       });
@@ -472,7 +563,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
         update({
           status: 'rendering',
           message: `Rendering page ${i + 1} of ${includedContent.length}`,
-          progress: { done: i, total: includedContent.length, current: ref.title },
+          progress: { done: i, total: includedContent.length, current: ref.title, unit: 'page' },
         });
         let pdf = livePdfs.get(ref.id);
         if (!pdf) {
@@ -497,22 +588,27 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
           }
           pdf = printed;
         }
-        const finalized = await deps.finalizePdf(pdf, { metadata: metadataFor(ref.title, 1) });
+        const finalized = await abortable(deps.finalizePdf(pdf, { metadata: metadataFor(ref.title, 1) }), signal);
         const stem = sanitizeFilenamePart(ref.title, 100) || ref.id;
         files.push({ name: `${String(i + 1).padStart(width, '0')}_${stem}.pdf`, data: finalized.bytes });
       }
+      await session?.close();
       check();
-      update({ status: 'merging', message: 'Saving', progress: { done: 0, total: 1 } });
+      update({ status: 'merging', message: 'Building the ZIP', progress: { done: 0, total: 1, unit: 'step' } });
       pushImageError();
+      livePdfs.clear();
       const date = exportedAt;
       if (files.length === 1) {
         const filename = buildFilename({ spaceKey, title: includedContent[0].title, date, ext: 'pdf' });
-        const downloadId = await abortable(deps.saveBytes(files[0].data, filename, 'application/pdf'), signal);
+        update({ message: SAVING_MESSAGE });
+        const downloadId = await abortable(deps.saveBytes(files[0].data, filename, 'application/pdf', signal), signal);
         finish(filename, downloadId, files[0].data.length, undefined);
       } else {
-        const zip = deps.zipFiles(files);
+        const zip = await abortable(deps.zipFiles(files, signal), signal);
+        files.length = 0;
         const filename = buildFilename({ spaceKey, title: docTitle, date, ext: 'zip' });
-        const downloadId = await abortable(deps.saveBytes(zip, filename, 'application/zip'), signal);
+        update({ message: SAVING_MESSAGE });
+        const downloadId = await abortable(deps.saveBytes(zip, filename, 'application/zip', signal), signal);
         finish(filename, downloadId, zip.length, undefined);
       }
       return;
@@ -525,7 +621,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
       update({
         status: 'rendering',
         message: batches.length > 1 ? `Printing part ${b + 1} of ${batches.length}` : 'Printing PDF',
-        progress: { done: b, total: batches.length },
+        progress: { done: b, total: batches.length, unit: 'step' },
       });
       const batch = batches[b];
       const asm = await worker({
@@ -534,7 +630,8 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
         site: request.site,
         pageIds: batch.map((p) => p.id),
         liveRenderIds: batch.filter((p) => livePdfs.has(p.id)).map((p) => p.id),
-        allPages: included,
+        allPages: pages,
+        excludeIds,
         options,
         cover: b === 0 ? cover : null,
         toc: b === 0 && options.includeToc,
@@ -548,76 +645,50 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
       }
       parts.push(printed);
     }
+    await session?.close();
+    session = undefined;
     check();
 
-    // ── 9. post-process ──
-    update({ status: 'merging', message: 'Building the PDF', progress: { done: 0, total: 1 } });
-    const base = parts.length > 1 ? (await deps.concatPdfs(parts)).bytes : parts[0];
+    // ── 9. post-process (every step is cancellable; references are dropped as soon as possible) ──
+    update({ status: 'merging', message: 'Building the PDF', progress: { done: 0, total: 1, unit: 'step' } });
+    const batchOf = new Map<string, number>();
+    batches.forEach((batch, i) => batch.forEach((p) => batchOf.set(p.id, i)));
+    const owner = (name: string) => {
+      const id = destinationPageId(name);
+      return id === undefined ? undefined : batchOf.get(id);
+    };
+    let base: Uint8Array | undefined = parts.length > 1 ? (await abortable(deps.concatPdfs(parts, owner), signal)).bytes : parts[0];
+    parts.length = 0;
     check();
-
-    const inserts: { afterPageIndex: number; pdf: Uint8Array; count: number }[] = [];
-    let outline: OutlineItem[] | undefined;
-    if (livePdfs.size > 0 || parts.length > 1) {
-      const dests = await deps.findSectionStartPages(
-        base,
-        included.map((p) => ({ id: p.id, title: p.title })),
-      );
-      check();
-      for (const ref of included) {
-        const pdf = livePdfs.get(ref.id);
-        if (!pdf) continue;
-        const at = dests.get(ref.id);
-        if (at === undefined) {
-          job.errors.push({
-            pageId: ref.id,
-            title: ref.title,
-            message: 'The live-rendered version could not be placed in the PDF; only the page header is included.',
-            severity: 'degraded',
-          });
-          continue;
-        }
-        let count = 0;
-        try {
-          count = await deps.countPdfPages(pdf);
-        } catch {
-          count = 0;
-        }
-        if (count > 0) inserts.push({ afterPageIndex: at, pdf, count });
-      }
-      inserts.sort((a, b) => a.afterPageIndex - b.afterPageIndex);
-      // Final start sheet of every page (after inserts), keyed by page id.
-      const startPage = new Map<string, number>();
-      const outlined: PageRef[] = [];
-      for (const ref of included) {
-        const at = dests.get(ref.id);
-        if (at === undefined) continue;
-        const shifted = shiftStartPage(at, inserts);
-        startPage.set(ref.id, shifted);
-        outlined.push(ref);
-      }
-      // Chrome's outline (page titles + their headings) survives concatenation and inserts
-      // (entries point at page objects, not indexes): only rebuild when there is none.
-      let existing: OutlineItem[] = [];
-      try {
-        existing = await deps.readOutline(base);
-      } catch {
-        existing = [];
-      }
-      if (!existing.length && outlined.length) outline = deps.buildOutline(outlined, startPage);
-    }
 
     pushImageError();
-    const finalized = await deps.finalizePdf(base, {
-      metadata: metadataFor(docTitle, pageCount),
-      inserts: inserts.length ? inserts.map(({ afterPageIndex, pdf }) => ({ afterPageIndex, pdf })) : undefined,
-      outline,
-      stampPageNumbers: stampNumbers ? {} : undefined,
-    });
+    const finalized = await abortable(
+      deps.finalizeExport(base!, {
+        metadata: metadataFor(docTitle, pageCount),
+        pages,
+        excludeIds,
+        live: livePdfs.size ? livePdfs : undefined,
+        stampPageNumbers: stampNumbers ? { skipFirst: cover ? 1 : 0 } : undefined,
+      }),
+      signal,
+    );
+    base = undefined;
+    livePdfs.clear();
+    for (const id of finalized.unplacedLive) {
+      const ref = included.find((p) => p.id === id);
+      job.errors.push({
+        pageId: id,
+        title: ref?.title ?? id,
+        message: 'The live-rendered version could not be placed in the PDF; only the page header is included.',
+        severity: 'degraded',
+      });
+    }
     check();
 
     // ── 10. download ──
     const filename = buildFilename({ spaceKey, title: docTitle, date: exportedAt, ext: 'pdf' });
-    const downloadId = await abortable(deps.saveBytes(finalized.bytes, filename, 'application/pdf'), signal);
+    update({ message: SAVING_MESSAGE });
+    const downloadId = await abortable(deps.saveBytes(finalized.bytes, filename, 'application/pdf', signal), signal);
     finish(filename, downloadId, finalized.bytes.length, finalized.pageCount);
   } catch (e) {
     if (isAbort(e, signal)) {
@@ -636,6 +707,7 @@ export async function runJob(job: ExportJobState, deps: RunnerDeps): Promise<voi
     }
   } finally {
     unsubscribe();
+    if (session) await withTimeout(session.close(), WORKER_CLEANUP_TIMEOUT_MS);
     if (tabId !== undefined && !keepTab) {
       // After a cancel the worker already dropped its state; just close the tab quickly.
       if (!signal.aborted) {

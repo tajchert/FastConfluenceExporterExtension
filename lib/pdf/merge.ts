@@ -16,8 +16,10 @@
  *  - `generateDocumentOutline` produces `/Outlines` whose first level are the `<h1>` elements
  *    (titles with collapsed whitespace, UTF-16BE hex strings for non-ASCII) with explicit
  *    `/Dest [pageRef /XYZ x y 0]`, nested by heading level.
- *  - Text in content streams uses glyph ids, so searching for marker text is not practical; we
- *    rely on named destinations and fall back to matching outline titles.
+ *  - Sections are located through named destinations, falling back to matching outline titles.
+ *  - Pages are copied without the tagged-PDF structure tree: copied pages lose their
+ *    /StructParents keys so they never point into another document's ParentTree (they would
+ *    map their content to unrelated structure elements).
  */
 import {
   PDFArray,
@@ -49,6 +51,27 @@ export interface PdfMetadata {
   keywords?: string[];
   creator: string;
   producer?: string;
+}
+
+/** One export's final document, see finalizeExport(). */
+export interface ExportFinalizeOptions {
+  metadata: PdfMetadata;
+  /**
+   * Every page of the export in document order, including pages that are not in the PDF
+   * (`excludeIds`): their children take their place in the bookmark hierarchy.
+   */
+  pages: PageRef[];
+  excludeIds?: Iterable<string>;
+  /** Live-rendered PDFs by page id, inserted right after that page's header sheet. */
+  live?: Map<string, Uint8Array>;
+  stampPageNumbers?: FinalizeOptions['stampPageNumbers'];
+}
+
+export interface ExportFinalizeResult {
+  bytes: Uint8Array;
+  pageCount: number;
+  /** Live pages whose header sheet could not be located (not inserted). */
+  unplacedLive: string[];
 }
 
 export interface FinalizeOptions {
@@ -314,6 +337,19 @@ function detachInternalLinks(src: PDFDocument, resolveNamed: boolean): Map<PDFDi
   return pending;
 }
 
+/** Removes tagged-PDF back-references of copied pages (see the header comment). */
+function stripStructParents(pages: PDFPage[]): void {
+  for (const page of pages) {
+    page.node.delete(PDFName.of('StructParents'));
+    const annots = page.node.lookup(PDFName.of('Annots'));
+    if (!(annots instanceof PDFArray)) continue;
+    for (let i = 0; i < annots.size(); i++) {
+      const annot = annots.lookup(i);
+      if (annot instanceof PDFDict) annot.delete(PDFName.of('StructParent'));
+    }
+  }
+}
+
 /**
  * Copies all pages of `src` into `dest` (not yet added to its page tree) and re-links internal
  * links. Link annotations are tagged with an index before copying so each copy can be matched
@@ -328,6 +364,7 @@ async function copyPagesWithLinks(
   const list = [...pending.entries()];
   list.forEach(([annot], i) => annot.set(PDFName.of('CfpLink'), PDFNumber.of(i)));
   const pages = await dest.copyPages(src, src.getPageIndices());
+  stripStructParents(pages);
   if (list.length === 0) return pages;
   for (const page of pages) {
     const annots = page.node.lookup(PDFName.of('Annots'));
@@ -350,29 +387,43 @@ async function copyPagesWithLinks(
 
 /**
  * Concatenates print batches. Named destinations of every part are merged into the result's
- * catalog `/Dests` (first definition wins), and the parts' outlines are concatenated with page
- * offsets, so links and Chrome's heading bookmarks keep working. A single part is returned as is
- * (keeps the tagged structure).
+ * catalog `/Dests`, and the parts' outlines are concatenated with page offsets, so links and
+ * Chrome's heading bookmarks keep working. A single part is returned as is (keeps the tagged
+ * structure).
+ *
+ * A name defined by several parts (a batch links to a page printed in another batch through a
+ * zero-size placeholder target) resolves to the part `owner(name)` returns — the batch holding
+ * the real section — or else to the first definition.
  */
-export async function concatPdfs(parts: Uint8Array[]): Promise<{ bytes: Uint8Array; offsets: number[] }> {
+export async function concatPdfs(
+  parts: Uint8Array[],
+  owner?: (name: string) => number | undefined,
+): Promise<{ bytes: Uint8Array; offsets: number[] }> {
   if (parts.length === 0) throw new Error('Nothing to merge: no PDF parts.');
   if (parts.length === 1) return { bytes: parts[0], offsets: [0] };
 
   const out = await PDFDocument.create({ updateMetadata: false });
   const offsets: number[] = [];
-  const dests = new Map<string, PDFObject[]>();
+  const dests = new Map<string, { part: number; dest: PDFObject[] }>();
   const outline: OutlineItem[] = [];
 
-  for (const bytes of parts) {
-    const src = await PDFDocument.load(bytes, LOAD_OPTS);
+  for (let part = 0; part < parts.length; part++) {
+    const src = await PDFDocument.load(parts[part], LOAD_OPTS);
     const offset = out.getPageCount();
     offsets.push(offset);
+    if (part === 0) {
+      const lang = src.catalog.get(PDFName.of('Lang'));
+      if (lang) out.catalog.set(PDFName.of('Lang'), lang instanceof PDFRef ? src.context.lookup(lang)! : lang);
+    }
 
     const srcByRef = pageIndexByRef(src);
     const srcDests: { name: string; pageIndex: number; view: PDFObject[] }[] = [];
     for (const [name, arr] of readNamedDests(src)) {
       const idx = destPageIndex(arr, srcByRef);
-      if (idx === undefined || dests.has(name)) continue;
+      if (idx === undefined) continue;
+      const known = dests.get(name);
+      // Keep the first definition unless this part owns the name.
+      if (known && (owner?.(name) !== part || known.part === part)) continue;
       const view: PDFObject[] = [];
       for (let j = 1; j < arr.size(); j++) view.push(arr.get(j));
       srcDests.push({ name, pageIndex: idx, view });
@@ -383,12 +434,12 @@ export async function concatPdfs(parts: Uint8Array[]): Promise<{ bytes: Uint8Arr
 
     const pages = await copyPagesWithLinks(out, src, false);
     for (const p of pages) out.addPage(p);
-    for (const d of srcDests) dests.set(d.name, [pages[d.pageIndex].ref, ...d.view]);
+    for (const d of srcDests) dests.set(d.name, { part, dest: [pages[d.pageIndex].ref, ...d.view] });
   }
 
   if (dests.size) {
     const dict = out.context.obj({}) as PDFDict;
-    for (const [name, arr] of dests) dict.set(PDFName.of(name), out.context.obj(arr));
+    for (const [name, d] of dests) dict.set(PDFName.of(name), out.context.obj(d.dest));
     out.catalog.set(PDFName.of('Dests'), out.context.register(dict));
   }
   if (outline.length) writeOutline(out, outline);
@@ -420,7 +471,10 @@ export async function findSectionStartPages(
   pdf: Uint8Array,
   pages: { id: string; title: string }[],
 ): Promise<Map<string, number>> {
-  const doc = await PDFDocument.load(pdf, LOAD_OPTS);
+  return sectionStartsOf(await PDFDocument.load(pdf, LOAD_OPTS), pages);
+}
+
+function sectionStartsOf(doc: PDFDocument, pages: { id: string; title: string }[]): Map<string, number> {
   const byRef = pageIndexByRef(doc);
   const named = readNamedDests(doc);
   const result = new Map<string, number>();
@@ -456,10 +510,16 @@ export async function findSectionStartPages(
 }
 
 /**
- * One bookmark per exported page, nested by `depth`, pointing at the page's first sheet. Children
- * of a page without a start sheet (failed / skipped) take its place in the hierarchy.
+ * One bookmark per exported page, nested by `depth`, pointing at the page's first sheet. Pass the
+ * full page list: children of a page without a start sheet (failed / skipped / not exported)
+ * take its place in the hierarchy. `headingsOf` adds a page's own bookmarks (its headings) before
+ * its sub-pages.
  */
-export function buildOutline(pages: PageRef[], startPage: Map<string, number>): OutlineItem[] {
+export function buildOutline(
+  pages: PageRef[],
+  startPage: Map<string, number>,
+  headingsOf?: (id: string) => OutlineItem[],
+): OutlineItem[] {
   const roots: OutlineItem[] = [];
   /** `children` = where items one level deeper than `depth` go. */
   const stack: { depth: number; children: OutlineItem[] }[] = [];
@@ -472,11 +532,18 @@ export function buildOutline(pages: PageRef[], startPage: Map<string, number>): 
       stack.push({ depth, children: siblings });
       continue;
     }
-    const item: OutlineItem = { title: p.title || 'Untitled', pageIndex, children: [] };
+    const item: OutlineItem = { title: p.title || 'Untitled', pageIndex, children: headingsOf?.(p.id) ?? [] };
     siblings.push(item);
     stack.push({ depth, children: item.children });
   }
   return roots;
+}
+
+/** Sheet index after `inserts` (each adds `count` sheets after `afterPageIndex`). */
+export function shiftPageIndex(index: number, inserts: { afterPageIndex: number; count: number }[]): number {
+  let shifted = index;
+  for (const ins of inserts) if (ins.afterPageIndex < index) shifted += ins.count;
+  return shifted;
 }
 
 function stampNumbers(doc: PDFDocument, font: Awaited<ReturnType<PDFDocument['embedFont']>>, o: NonNullable<FinalizeOptions['stampPageNumbers']>): void {
@@ -527,7 +594,12 @@ export async function finalizePdf(base: Uint8Array, o: FinalizeOptions): Promise
     stampNumbers(doc, font, o.stampPageNumbers);
   }
 
-  const m = o.metadata;
+  setMetadata(doc, o.metadata);
+  const bytes = await doc.save({ useObjectStreams: true });
+  return { bytes, pageCount: doc.getPageCount() };
+}
+
+function setMetadata(doc: PDFDocument, m: PdfMetadata): void {
   const now = new Date();
   doc.setTitle(m.title, { showInWindowTitleBar: true });
   if (m.author) doc.setAuthor(m.author);
@@ -537,7 +609,79 @@ export async function finalizePdf(base: Uint8Array, o: FinalizeOptions): Promise
   doc.setProducer(m.producer ?? m.creator);
   doc.setCreationDate(now);
   doc.setModificationDate(now);
+}
 
+/**
+ * Builds the final combined export from the printed (and concatenated) base document, parsing
+ * it only once:
+ *  1. locates every page section (`p-{id}` destinations, outline titles as fallback);
+ *  2. inserts each live-rendered PDF right after its page's header sheet;
+ *  3. writes the bookmarks as the page tree (nested by depth, FR-8.4), each page carrying its
+ *     own heading bookmarks taken from Chrome's outline (indexes shifted past the inserts);
+ *  4. stamps page numbers when asked, sets metadata and saves.
+ */
+export async function finalizeExport(base: Uint8Array, o: ExportFinalizeOptions): Promise<ExportFinalizeResult> {
+  const doc = await PDFDocument.load(base, LOAD_OPTS);
+  const excluded = new Set(o.excludeIds ?? []);
+  const sections = o.pages.filter((p) => !excluded.has(p.id));
+  const starts = sectionStartsOf(doc, sections);
+  const chromeTop = readOutlineOf(doc);
+
+  // ── live inserts (applied last to first so base indexes stay valid) ──
+  const unplacedLive: string[] = [];
+  const planned: { after: number; src: PDFDocument; order: number }[] = [];
+  for (const p of sections) {
+    const pdf = o.live?.get(p.id);
+    if (!pdf) continue;
+    const at = starts.get(p.id);
+    if (at === undefined) {
+      unplacedLive.push(p.id);
+      continue;
+    }
+    const src = await PDFDocument.load(pdf, LOAD_OPTS);
+    if (src.getPageCount() > 0) planned.push({ after: at, src, order: planned.length });
+  }
+  const inserts: { afterPageIndex: number; count: number }[] = [];
+  planned.sort((a, b) => b.after - a.after || b.order - a.order);
+  for (const ins of planned) {
+    const pages = await copyPagesWithLinks(doc, ins.src, true);
+    pages.forEach((page, i) => doc.insertPage(ins.after + 1 + i, page));
+    inserts.push({ afterPageIndex: ins.after, count: pages.length });
+  }
+  const shift = (i: number) => shiftPageIndex(i, inserts);
+  const shiftItems = (items: OutlineItem[]): OutlineItem[] =>
+    items.map((it) => ({ title: it.title, pageIndex: shift(it.pageIndex), children: shiftItems(it.children) }));
+
+  // ── bookmarks: page tree + each page's headings from Chrome's outline ──
+  const byId = new Map(sections.map((p) => [p.id, p]));
+  const used = new Set<number>();
+  const headingsOf = (id: string): OutlineItem[] => {
+    const at = starts.get(id);
+    const title = normTitle(byId.get(id)?.title ?? '');
+    let k = chromeTop.findIndex((it, i) => !used.has(i) && it.pageIndex === at && normTitle(it.title) === title);
+    if (k < 0) k = chromeTop.findIndex((it, i) => !used.has(i) && it.pageIndex === at);
+    if (k < 0) return [];
+    used.add(k);
+    return shiftItems(chromeTop[k].children);
+  };
+  const startPage = new Map<string, number>();
+  for (const [id, at] of starts) startPage.set(id, shift(at));
+  const outline = buildOutline(o.pages, startPage, headingsOf);
+  // Chrome bookmarks that belong to no page (should not happen) are kept, in document order.
+  const extra = shiftItems(chromeTop.filter((_, i) => !used.has(i)));
+  if (extra.length) {
+    outline.push(...extra);
+    outline.sort((a, b) => a.pageIndex - b.pageIndex); // stable: page order is already sorted
+  }
+  writeOutline(doc, outline);
+  if (doc.catalog.get(PDFName.of('Outlines'))) doc.catalog.set(PDFName.of('PageMode'), PDFName.of('UseOutlines'));
+  else doc.catalog.delete(PDFName.of('PageMode'));
+
+  if (o.stampPageNumbers) {
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    stampNumbers(doc, font, o.stampPageNumbers);
+  }
+  setMetadata(doc, o.metadata);
   const bytes = await doc.save({ useObjectStreams: true });
-  return { bytes, pageCount: doc.getPageCount() };
+  return { bytes, pageCount: doc.getPageCount(), unplacedLive };
 }

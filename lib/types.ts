@@ -78,6 +78,8 @@ export interface FetchedPageInfo {
   linkOnly?: boolean;
   /** Space key reported by Confluence for the fetched page (used to enforce blocked spaces). */
   spaceKey?: string;
+  /** Title reported by Confluence (fills refs that were built without one). */
+  title?: string;
 }
 
 export type PaperSize = 'A4' | 'Letter' | 'Legal' | 'A3';
@@ -176,7 +178,16 @@ export interface ExportJobState {
   status: JobStatus;
   /** Human-readable phase description, e.g. "Fetching pages", "Throttled by Confluence, retrying…" */
   message?: string;
-  progress: { done: number; total: number; current?: string };
+  /**
+   * Progress of the current phase. `unit: 'page'` = counting pages ("Page 3 of 25");
+   * 'step' = other work (print batches, building the file).
+   */
+  progress: { done: number; total: number; current?: string; unit?: 'page' | 'step' };
+  /**
+   * Number of pages in the export. Persisted and broadcast job snapshots leave `pages` empty
+   * (it can be large) and carry this count instead.
+   */
+  pageCount?: number;
   errors: JobError[];
   throttled?: boolean;
   createdAt: number;
@@ -189,6 +200,10 @@ export interface ExportJobState {
    * assembled document instead (no download, no `result`).
    */
   printDialog?: boolean;
+  /** The browser stopped the extension mid-export; "Try again" reuses the stored page list. */
+  interrupted?: boolean;
+  /** Key of the pending start (popup permission hand-off) this job was started from. */
+  startKey?: number;
 }
 
 /** Lazy tree node for the manual selection picker (FR-6). */

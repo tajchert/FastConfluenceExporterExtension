@@ -1,6 +1,6 @@
 # Privacy Policy: Fast PDF Export for Confluence
 
-_Last updated: 6 October 2026_
+_Last updated: 6 October 2026 (embedded resources disclosed in section 2)_
 
 This policy covers the browser extension "Fast PDF Export for Confluence" (the "extension") for
 Google Chrome, Microsoft Edge and other Chromium-based browsers.
@@ -24,12 +24,19 @@ processes it **locally in your browser**:
 
 ## 2. Network access
 
-- The extension sends network requests **only to the Confluence site you are exporting from**,
-  and only to read content (HTTP `GET`). It never creates, edits or deletes anything in Confluence.
+- The extension's own requests go **only to the Confluence site you are exporting from**, and
+  only read content (HTTP `GET`). It never creates, edits or deletes anything in Confluence.
 - Those requests use your existing browser session with that site, exactly as when you browse
   it yourself. The extension **never reads, stores or sends your cookies, passwords or tokens**.
-- The extension makes **no other network requests**: no analytics, telemetry, crash reporting,
-  advertising, fonts, CDNs or remote code. All of its code ships inside the extension package.
+- **Resources embedded in your pages.** To put the pages into the PDF, the browser loads the
+  images and other resources the pages embed (attachments, emoji, avatars, images an author
+  inserted from another website) from wherever the page references them. This can include hosts
+  outside your Confluence site, just as when you view the page in Confluence; such a host learns
+  your IP address and that the resource was requested. The extension sends no referrer with
+  these requests, so they do not reveal the address of your Confluence site.
+- Apart from that, the extension makes **no network requests**: no analytics, telemetry, crash
+  reporting, advertising, fonts, CDNs or remote code. All of its code ships inside the extension
+  package.
 - When you use the optional **Live render** feature, the extension opens the Confluence page itself
   in a background tab, so that page loads the same way as when you open it yourself. This
   includes any third-party apps your Confluence administrator installed. Those requests are made
@@ -38,7 +45,8 @@ processes it **locally in your browser**:
 ## 3. What the extension does NOT do
 
 - It does not collect personal information or browsing history.
-- It does not send any data to the developer or to any third party.
+- It does not send any data to the developer or to any third party. (The only requests that can
+  reach other hosts are the loads of resources embedded in your pages, described in section 2.)
 - It does not sell, rent or share data, and it does not use data for advertising, credit scoring
   or any purpose other than creating the PDF you asked for.
 - It does not run on any website until you grant access to that site, and it only acts there

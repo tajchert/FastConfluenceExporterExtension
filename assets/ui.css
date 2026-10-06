@@ -10,9 +10,13 @@
   --border-strong: #c4cad3;
   --text: #1c2129;
   --text-muted: #5d6675;
-  --text-subtle: #808998;
+  /* ≥ 4.5:1 (WCAG AA) on --surface, --bg and --surface-2 for 12px hints. */
+  --text-subtle: #646c7a;
   --accent: #2563eb;
   --accent-hover: #1d4ed8;
+  /* Background of primary buttons (white text on it ≥ 4.5:1). */
+  --accent-strong: #2563eb;
+  --accent-strong-hover: #1d4ed8;
   --accent-soft: #e8efff;
   --accent-text: #ffffff;
   --success: #15803d;
@@ -45,6 +49,9 @@
     --text-subtle: #7d8796;
     --accent: #4f86f7;
     --accent-hover: #6d9bff;
+    /* The light accent is for links and focus rings; white text needs a darker button. */
+    --accent-strong: #2c68d6;
+    --accent-strong-hover: #285fc2;
     --accent-soft: #1b2a47;
     --accent-text: #ffffff;
     --success: #4ade80;
@@ -172,11 +179,11 @@ kbd {
   width: 100%;
 }
 .btn-primary {
-  background: var(--accent);
+  background: var(--accent-strong);
   color: var(--accent-text);
 }
 .btn-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--accent-strong-hover);
 }
 .btn-secondary {
   background: var(--surface);
@@ -1118,6 +1125,9 @@ fieldset:disabled .segment {
   padding: 8px 12px;
   background: var(--surface-2);
   border-top: 1px solid var(--border);
+}
+.last-job.is-error {
+  color: var(--danger);
 }
 .last-job .grow {
   flex: 1;

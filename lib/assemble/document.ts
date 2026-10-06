@@ -181,7 +181,27 @@ function tocLevelClass(level: number): string {
   return level <= 3 ? `cf-toc-l${level}` : 'cf-toc-deep';
 }
 
-function buildToc(doc: Document, entries: PageRef[]): HTMLElement {
+/**
+ * TOC levels of the pages in the PDF, from the full page list in tree order: a page sits under
+ * its nearest ancestor that is in the PDF; children of a page that is not (failed / skipped)
+ * take its place — the same rule as the PDF bookmarks (lib/pdf/merge.ts buildOutline).
+ */
+export function tocLevels(allPages: PageRef[], included: (id: string) => boolean): Map<string, number> {
+  const levels = new Map<string, number>();
+  const stack: { depth: number; level: number; included: boolean }[] = [];
+  for (const p of allPages) {
+    const depth = Number.isFinite(p.depth) ? p.depth : 0;
+    while (stack.length && stack[stack.length - 1]!.depth >= depth) stack.pop();
+    const top = stack[stack.length - 1];
+    const level = top ? top.level + (top.included ? 1 : 0) : 0;
+    const inc = included(p.id);
+    if (inc && !levels.has(p.id)) levels.set(p.id, level);
+    stack.push({ depth, level, included: inc });
+  }
+  return levels;
+}
+
+function buildToc(doc: Document, allPages: PageRef[], included: (id: string) => boolean): HTMLElement {
   const root = el(doc, 'ol', { class: 'cf-toc-list' });
   const nav = el(
     doc,
@@ -190,16 +210,16 @@ function buildToc(doc: Document, entries: PageRef[]): HTMLElement {
     el(doc, 'div', { class: 'cf-toc-title' }, 'Contents'),
     root,
   );
+  const levels = tocLevels(allPages, included);
+  const entries = allPages.filter((p, i) => levels.has(p.id) && allPages.findIndex((q) => q.id === p.id) === i);
   if (entries.length === 0) return nav;
 
-  const base = Math.min(...entries.map((e) => (Number.isFinite(e.depth) ? e.depth : 0)));
   const stack: HTMLOListElement[] = [root];
   let lastLi: HTMLLIElement | null = null;
 
   for (const entry of entries) {
-    let level = Math.max(0, (Number.isFinite(entry.depth) ? entry.depth : 0) - base);
     // Never nest more than one level below the previous entry.
-    level = Math.min(level, lastLi ? stack.length : 0);
+    const level = Math.min(levels.get(entry.id)!, lastLi ? stack.length : 0);
     if (level > stack.length - 1 && lastLi) {
       const ol = el(doc, 'ol');
       lastLi.append(ol);
@@ -226,13 +246,7 @@ function buildHeader(
   options: ExportOptions,
 ): HTMLElement {
   const title = body?.title || ref.title || 'Untitled';
-  const header = el(
-    doc,
-    'header',
-    { class: 'cf-page-meta' },
-    el(doc, 'span', { class: 'cf-marker', 'aria-hidden': 'true' }, `⟦cfp:${ref.id}⟧`),
-    el(doc, 'h1', { class: 'cf-page-title' }, title),
-  );
+  const header = el(doc, 'header', { class: 'cf-page-meta' }, el(doc, 'h1', { class: 'cf-page-title' }, title));
   if (!options.includePageMeta) return header;
 
   const items: Node[] = [];
@@ -405,8 +419,11 @@ function designWidth(table: HTMLElement): number {
   return Math.max(Number.isFinite(attr) ? attr : 0, sum);
 }
 
-/** Replaces fixed pixel widths (editor colgroups, inline table widths) with proportional ones. */
-function normalizeTableWidths(table: HTMLElement): void {
+/**
+ * Replaces fixed pixel widths (editor colgroups, inline table widths) with proportional ones.
+ * Returns true when every column got a percentage width (a fixed layout then keeps them).
+ */
+function normalizeTableWidths(table: HTMLElement): boolean {
   table.removeAttribute('width');
   table.style.removeProperty('width');
   table.style.removeProperty('min-width');
@@ -416,7 +433,8 @@ function normalizeTableWidths(table: HTMLElement): void {
     const m = /^([\d.]+)(px)?$/.exec(v.trim());
     return m ? parseFloat(m[1]!) : NaN;
   });
-  if (cols.length > 0 && px.every((n) => Number.isFinite(n) && n > 0)) {
+  const proportional = cols.length > 0 && px.every((n) => Number.isFinite(n) && n > 0);
+  if (proportional) {
     const total = px.reduce((a, b) => a + b, 0);
     cols.forEach((c, i) => {
       c.removeAttribute('width');
@@ -433,12 +451,15 @@ function normalizeTableWidths(table: HTMLElement): void {
     cell.style.removeProperty('min-width');
     if (/px$/.test(cell.style.width)) cell.style.removeProperty('width');
   }
+  return proportional;
 }
 
 /**
  * Layout-dependent marking, done in as few layout passes as possible:
  *  - small pre/panels/blocks get `cf-keep` (break-inside: avoid); big ones may split across sheets;
- *  - tables wider than their container get `cf-wide`, then `cf-wide-xl` if still too wide.
+ *  - tables wider than their container get `cf-wide`, then `cf-wide-xl` if still too wide;
+ *    `cf-fixed` (fixed table layout) only when the author's column widths were kept as
+ *    percentages — otherwise auto layout gives text-heavy columns more room.
  * In environments without layout (tests) every measurement is 0 and nothing harmful happens.
  */
 function markLayout(doc: Document, options: ExportOptions): void {
@@ -473,7 +494,7 @@ function markLayout(doc: Document, options: ExportOptions): void {
   };
   const wide = tables.filter((t) => tooWide(t) || designedWide(t));
   for (const t of wide) {
-    normalizeTableWidths(t);
+    if (normalizeTableWidths(t)) t.classList.add('cf-fixed');
     t.classList.add('cf-wide');
   }
   const stillWide = wide.filter(tooWide);
@@ -511,6 +532,9 @@ export function buildPrintDocument(doc: Document, input: AssembleInput): void {
   const head = doc.createElement('head');
   head.append(
     el(doc, 'meta', { charset: 'utf-8' }),
+    // Images embedded in pages may come from other hosts: never tell them which Confluence
+    // site (possibly an internal host name) the export is reading from.
+    el(doc, 'meta', { name: 'referrer', content: 'no-referrer' }),
     el(doc, 'meta', { name: 'viewport', content: 'width=device-width, initial-scale=1' }),
     el(doc, 'meta', { name: 'generator', content: input.generatedBy }),
     el(doc, 'title', {}, title),
@@ -523,8 +547,8 @@ export function buildPrintDocument(doc: Document, input: AssembleInput): void {
   const main = el(doc, 'main', { class: 'cf-doc' });
   if (input.cover) main.append(buildCover(doc, input.cover, input.site, input.generatedBy));
   if (input.toc) {
-    const tocEntries = inDocument.length > 0 ? inDocument : input.pages.map((p) => p.ref);
-    main.append(buildToc(doc, tocEntries));
+    if (inDocument.length > 0) main.append(buildToc(doc, input.allPages, (id) => !excluded.has(id)));
+    else main.append(buildToc(doc, input.pages.map((p) => p.ref), () => true));
   }
 
   const seen = new Set<string>();
@@ -542,6 +566,25 @@ export function buildPrintDocument(doc: Document, input: AssembleInput): void {
       );
       main.append(article);
     }
+  }
+
+  // Pages printed in another batch: a zero-size target per page keeps Chrome from dropping the
+  // TOC entries and links that point at them (it drops links to ids missing in the printed
+  // document). The resulting `/p-{id}` destination in this batch is a placeholder: when the
+  // batches are merged, the batch holding the real section owns the name (concatPdfs `owner`).
+  // Not display:none — Chrome needs a laid-out box to emit the link and destination.
+  const elsewhere = [...documentPageIds].filter((id) => !seen.has(id));
+  if (elsewhere.length) {
+    main.append(
+      ...elsewhere.map((id) =>
+        el(doc, 'span', {
+          id: `p-${id}`,
+          class: 'cf-xbatch',
+          'aria-hidden': 'true',
+          style: 'position:absolute;width:0;height:0;overflow:hidden',
+        }),
+      ),
+    );
   }
 
   // Chrome only emits a named destination (`/p-{id}`) for an id that some `<a href="#id">` in the

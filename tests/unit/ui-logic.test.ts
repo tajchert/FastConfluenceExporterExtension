@@ -7,8 +7,11 @@ import {
   computeCheckStates,
   emptyTree,
   isRestrictedUrl,
+  exportableCount,
   jobFraction,
   largeExportGuard,
+  progressCount,
+  summarizeProblems,
   marginPresetOf,
   parseList,
   parseSiteInput,
@@ -68,11 +71,36 @@ describe('small helpers', () => {
     expect(isRestrictedUrl(undefined)).toBe(false);
   });
   it('job progress helpers', () => {
-    expect(jobFraction({ status: 'fetching', progress: { done: 5, total: 10 } })).toBe(0.5);
+    // Phase-weighted: fetching covers 5–60 %, so half the pages fetched is 33 %.
+    expect(jobFraction({ status: 'fetching', progress: { done: 5, total: 10 } })).toBe(0.33);
     expect(jobFraction({ status: 'collecting', progress: { done: 0, total: 0 } })).toBeNull();
     expect(jobFraction({ status: 'done', progress: { done: 0, total: 0 } })).toBe(1);
+    // The bar never jumps back when printing starts counting from 0.
+    const fetched = jobFraction({ status: 'fetching', progress: { done: 25, total: 25 } })!;
+    const printing = jobFraction({ status: 'rendering', progress: { done: 0, total: 1, unit: 'step' } })!;
+    expect(printing).toBeGreaterThanOrEqual(fetched);
+    expect(jobFraction({ status: 'merging', progress: { done: 0, total: 1, unit: 'step' } })!).toBeGreaterThanOrEqual(printing);
+    expect(progressCount({ status: 'fetching', progress: { done: 3, total: 25, unit: 'page' } })).toBe('Page 3 of 25');
+    expect(progressCount({ status: 'rendering', progress: { done: 0, total: 1, unit: 'step' } })).toBeNull();
+    expect(progressCount({ status: 'rendering', progress: { done: 2, total: 9, unit: 'page' } })).toBe('Page 2 of 9');
     expect(statusLabel({ status: 'rendering' })).toMatch(/Rendering/);
     expect(statusLabel({ status: 'rendering', message: 'Custom' })).toBe('Custom');
+  });
+});
+
+describe('summarizeProblems', () => {
+  it('counts pages, not fatal errors or image notes', () => {
+    const s = summarizeProblems([
+      { pageId: '2', title: 'Two', message: 'No permission', severity: 'skipped' },
+      { pageId: '3', title: 'Three', message: 'Live render failed', severity: 'degraded' },
+      { pageId: '3', title: 'Three', message: 'Again', severity: 'degraded' },
+      { pageId: '', title: 'Images', message: '2 images could not be loaded', severity: 'degraded' },
+      { pageId: '', title: '', message: 'Logged out', severity: 'fatal' },
+    ]);
+    expect(s.pageCount).toBe(2);
+    expect(s.rows.map((r) => r.pageId)).toEqual(['2', '3', '3']);
+    expect(s.imageNote).toBe('2 images could not be loaded');
+    expect(summarizeProblems([{ pageId: '', title: '', message: 'x', severity: 'fatal' }]).rows).toEqual([]);
   });
 });
 
@@ -80,6 +108,8 @@ describe('largeExportGuard (FR-16)', () => {
   const limits = { warn: 150, confirm: 500 };
   it('levels', () => {
     expect(largeExportGuard(0, limits).level).toBe('empty');
+    expect(largeExportGuard(0, limits, true).message).toMatch(/Only folders/);
+    expect(exportableCount([{ type: 'folder' }, { type: 'page' }, { type: 'whiteboard' }])).toBe(2);
     expect(largeExportGuard(150, limits).level).toBe('none');
     expect(largeExportGuard(151, limits).level).toBe('warn');
     expect(largeExportGuard(500, limits).level).toBe('warn');

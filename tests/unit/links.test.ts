@@ -28,6 +28,8 @@ describe('extractLinksFromExportView', () => {
     `;
     const t = extractLinksFromExportView(html, cloud, '100');
     expect(t.ids).toEqual(['200', '201', '202', '315494566', '300', '203']);
+    // Known types let the collector resolve each id without type discovery.
+    expect(t.types).toEqual({ '200': 'page', '201': 'page', '202': 'page', '300': 'folder', '203': 'page' });
     expect(t.titles).toEqual([]);
     expect(t.tinyCodes).toEqual([]);
   });
@@ -47,7 +49,7 @@ describe('extractLinksFromExportView', () => {
       <img src="https://acme.atlassian.net/wiki/download/attachments/100/a.png" data-linked-resource-id="321" data-linked-resource-type="attachment">
     `;
     const t = extractLinksFromExportView(html, cloud, '100');
-    expect(t).toEqual({ ids: [], titles: [], tinyCodes: [] });
+    expect(t).toEqual({ ids: [], types: {}, titles: [], tinyCodes: [] });
   });
 
   it('does not treat a page slug that mentions attachments/download as ignored', () => {
@@ -60,15 +62,24 @@ describe('extractLinksFromExportView', () => {
       <a href="/confluence/display/OPS/Runbook+Index">by title</a>
       <a href="/confluence/pages/viewpage.action?pageId=77">by id</a>
       <a href="/confluence/display/~jdoe">profile</a>
+      <a href="/confluence/display/~jdoe/">profile</a>
+      <a href="/confluence/display/~jdoe/My+Runbook">personal space page</a>
+      <a href="/confluence/display/OPS/2026/10/01/Launch+Day">blog post</a>
       <a href="/other/display/OPS/Elsewhere">other app</a>
+      <a href="/confluence/x/phDOEg" data-linked-resource-type="blog_post" data-linked-resource-id="91">typed</a>
     `;
     const t = extractLinksFromExportView(html, dc, '1');
-    expect(t.ids).toEqual(['77']);
-    expect(t.titles).toEqual([{ spaceKey: 'OPS', title: 'Runbook Index' }]);
+    expect(t.ids).toEqual(['77', '91']);
+    expect(t.types['91']).toBe('blogpost');
+    expect(t.titles).toEqual([
+      { spaceKey: 'OPS', title: 'Runbook Index' },
+      { spaceKey: '~jdoe', title: 'My Runbook' },
+      { spaceKey: 'OPS', title: 'Launch Day', type: 'blogpost', postingDay: '2026-10-01' },
+    ]);
   });
 
   it('returns empty targets for empty html', () => {
-    expect(extractLinksFromExportView('', cloud, '1')).toEqual({ ids: [], titles: [], tinyCodes: [] });
+    expect(extractLinksFromExportView('', cloud, '1')).toEqual({ ids: [], types: {}, titles: [], tinyCodes: [] });
   });
 });
 
@@ -92,8 +103,15 @@ describe('extractLinksFromStorage', () => {
     expect(t.tinyCodes).toEqual([]);
   });
 
+  it('keeps blog posts referenced by title and posting day', () => {
+    const storage = `<ac:link><ri:blog-post ri:space-key="NEWS" ri:content-title="Launch" ri:posting-day="2026/10/1" /></ac:link>`;
+    expect(extractLinksFromStorage(storage, cloud, '1').titles).toEqual([
+      { spaceKey: 'NEWS', title: 'Launch', type: 'blogpost', postingDay: '2026-10-01' },
+    ]);
+  });
+
   it('skips the page itself by id', () => {
     const storage = `<ac:link><ri:page ri:content-id="1" /></ac:link><a href="/wiki/spaces/A/pages/1">self</a>`;
-    expect(extractLinksFromStorage(storage, cloud, '1')).toEqual({ ids: [], titles: [], tinyCodes: [] });
+    expect(extractLinksFromStorage(storage, cloud, '1')).toEqual({ ids: [], types: {}, titles: [], tinyCodes: [] });
   });
 });

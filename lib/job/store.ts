@@ -8,10 +8,21 @@
 import type { ExportJobState, ExportRequest, PageRef } from '../types';
 
 const JOB_PREFIX = 'job:';
+const CHECKPOINT_PREFIX = 'checkpoint:';
 const PENDING_KEY = 'pendingStart';
 export const MAX_STORED_JOBS = 10;
-/** A pending start older than this is ignored (the user walked away from the prompt). */
-export const PENDING_START_TTL_MS = 5 * 60_000;
+/**
+ * A pending start older than this is ignored. Kept short: if the popup closed on a denied
+ * prompt, nothing clears it, and a later grant for the same site (options page, preview) must
+ * not start that old export by surprise. Other permission requests clear it as well.
+ */
+export const PENDING_START_TTL_MS = 90_000;
+
+/** The request and page list of a job, stored once at its start ("Try again" after an interruption). */
+export interface JobCheckpoint {
+  request: ExportRequest;
+  pages: PageRef[];
+}
 
 export interface PendingStart {
   request: ExportRequest;
@@ -43,15 +54,30 @@ export async function listJobs(): Promise<ExportJobState[]> {
 }
 
 export async function deleteJob(id: string): Promise<void> {
-  await session().remove(JOB_PREFIX + id);
+  await session().remove([JOB_PREFIX + id, CHECKPOINT_PREFIX + id]);
 }
 
-/** Keep only the newest `keep` jobs. Running jobs are never removed. */
+export async function saveCheckpoint(id: string, checkpoint: JobCheckpoint): Promise<void> {
+  await session().set({ [CHECKPOINT_PREFIX + id]: checkpoint });
+}
+
+export async function loadCheckpoint(id: string): Promise<JobCheckpoint | null> {
+  const key = CHECKPOINT_PREFIX + id;
+  const res = await session().get(key);
+  const c = res[key] as JobCheckpoint | undefined;
+  return c && typeof c === 'object' && c.request && Array.isArray(c.pages) ? c : null;
+}
+
+export async function deleteCheckpoint(id: string): Promise<void> {
+  await session().remove(CHECKPOINT_PREFIX + id);
+}
+
+/** Keep only the newest `keep` jobs (and their checkpoints). Running jobs are never removed. */
 export async function pruneJobs(keep: number = MAX_STORED_JOBS, runningIds: Iterable<string> = []): Promise<void> {
   const running = new Set(runningIds);
   const jobs = await listJobs();
   const stale = jobs.slice(keep).filter((j) => !running.has(j.id));
-  if (stale.length) await session().remove(stale.map((j) => JOB_PREFIX + j.id));
+  if (stale.length) await session().remove(stale.flatMap((j) => [JOB_PREFIX + j.id, CHECKPOINT_PREFIX + j.id]));
 }
 
 export async function getPendingStart(now: number = Date.now()): Promise<PendingStart | null> {

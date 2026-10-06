@@ -6,9 +6,10 @@ import { defineBackground } from 'wxt/utils/define-background';
 import { probePage } from '../lib/confluence/detect';
 import { parseConfluenceUrl } from '../lib/confluence/url';
 import * as manager from '../lib/job/manager';
-import { clearPendingStart, getPendingStart } from '../lib/job/store';
-import type { ProbeResult, UiToSw, UiToSwResponses, WorkerToSw } from '../lib/messages';
-import { hasSiteAccess, patternsCoverOrigin, requestSiteAccess } from '../lib/permissions';
+import { getPendingStart } from '../lib/job/store';
+import { UI_PORT_NAME, type ProbeResult, type UiToSw, type UiToSwResponses, type WorkerToSw } from '../lib/messages';
+import { menuPatterns } from '../lib/linkPatterns';
+import { hasSiteAccess, listGrantedOrigins, patternsCoverOrigin } from '../lib/permissions';
 import { respond } from '../lib/rpc';
 import { loadSettings } from '../lib/settings';
 import type { ContentType, ExportMode, ExportRequest, PageContext, SiteInfo } from '../lib/types';
@@ -18,27 +19,17 @@ const MENU_EXPORT_PAGE = 'cfp-export-link';
 const MENU_EXPORT_TREE = 'cfp-export-link-tree';
 const INFO_NOTIFICATION = 'cfp-info';
 
-/** Confluence page URL shapes (Cloud incl. custom domains, DC/Server with any context path). */
-const LINK_PATTERNS = [
-  '*://*/*spaces/*/pages/*',
-  '*://*/*spaces/*/blog/*',
-  '*://*/*pages/viewpage.action*',
-  '*://*/display/*/*',
-  '*://*/*/display/*/*',
-  '*://*/x/*',
-  '*://*/*/x/*',
-];
-
 const UI_TYPES = new Set<string>([
-  'collect',
   'tree/children',
   'job/start',
+  'job/claimPending',
+  'job/retry',
   'job/cancel',
   'job/get',
   'job/list',
   'preview/open',
 ]);
-const WORKER_EVENTS = new Set<string>(['worker/progress', 'worker/throttled', 'worker/ready']);
+const WORKER_EVENTS = new Set<string>(['worker/progress', 'worker/throttled', 'worker/done', 'worker/ready']);
 const CONTENT_TYPES = new Set<string>(['page', 'blogpost', 'folder', 'whiteboard', 'database', 'embed']);
 
 function t(key: string, fallback: string): string {
@@ -77,12 +68,14 @@ async function showInfo(title: string, message: string): Promise<void> {
 async function handleUi(msg: UiToSw, sender: chrome.runtime.MessageSender): Promise<UiToSwResponses[UiToSw['type']]> {
   const nearTabId = sender.tab?.id;
   switch (msg.type) {
-    case 'collect':
-      return manager.collectForPreview(msg.request, nearTabId);
     case 'tree/children':
       return manager.treeChildren(msg, nearTabId);
     case 'job/start':
       return { jobId: await manager.startJob(msg.request, msg.pages) };
+    case 'job/claimPending':
+      return { jobId: await manager.claimPendingStart(msg.pending) };
+    case 'job/retry':
+      return { jobId: await manager.retryJob(msg.jobId) };
     case 'job/cancel':
       return manager.cancelJob(msg.jobId);
     case 'job/get':
@@ -170,18 +163,37 @@ async function exportActiveTab(tab?: chrome.tabs.Tab): Promise<void> {
 
 // ───────────────────────────── context menu (FR-15) ─────────────────────────────
 
+async function grantedPatterns(): Promise<string[]> {
+  try {
+    return menuPatterns(await listGrantedOrigins());
+  } catch {
+    return menuPatterns([]);
+  }
+}
+
 function setupContextMenus(): void {
-  chrome.contextMenus.removeAll(() => {
-    void chrome.runtime.lastError;
-    const common = { contexts: ['link'] as ['link'], targetUrlPatterns: LINK_PATTERNS };
-    chrome.contextMenus.create(
-      { id: MENU_EXPORT_PAGE, title: t('contextMenuExportPage', 'Export this page to PDF'), ...common },
-      () => void chrome.runtime.lastError,
-    );
-    chrome.contextMenus.create(
-      { id: MENU_EXPORT_TREE, title: t('contextMenuExportTree', 'Export this page + children to PDF'), ...common },
-      () => void chrome.runtime.lastError,
-    );
+  void grantedPatterns().then((targetUrlPatterns) => {
+    chrome.contextMenus.removeAll(() => {
+      void chrome.runtime.lastError;
+      const common = { contexts: ['link'] as ['link'], targetUrlPatterns };
+      chrome.contextMenus.create(
+        { id: MENU_EXPORT_PAGE, title: t('contextMenuExportPage', 'Export this page to PDF'), ...common },
+        () => void chrome.runtime.lastError,
+      );
+      chrome.contextMenus.create(
+        { id: MENU_EXPORT_TREE, title: t('contextMenuExportTree', 'Export this page + children to PDF'), ...common },
+        () => void chrome.runtime.lastError,
+      );
+    });
+  });
+}
+
+/** Granted sites changed: the generic link shapes follow them. */
+function refreshContextMenus(): void {
+  void grantedPatterns().then((targetUrlPatterns) => {
+    for (const id of [MENU_EXPORT_PAGE, MENU_EXPORT_TREE]) {
+      chrome.contextMenus.update(id, { targetUrlPatterns }, () => void chrome.runtime.lastError);
+    }
   });
 }
 
@@ -219,28 +231,16 @@ function handleContextClick(info: chrome.contextMenus.OnClickData, tab?: chrome.
     return;
   }
   if (link.protocol !== 'https:' && link.protocol !== 'http:') return;
-  // The menu click is a user gesture: ask for site access now, before anything is awaited.
-  let access: Promise<'granted' | 'denied' | 'unavailable'>;
-  try {
-    access = requestSiteAccess(link.origin).then(
-      (ok) => (ok ? 'granted' : 'denied'),
-      () => 'unavailable',
-    );
-  } catch {
-    access = Promise.resolve('unavailable');
-  }
   const mode: ExportMode = info.menuItemId === MENU_EXPORT_TREE ? 'subtree' : 'current';
-  void exportLink(link, mode, access, tab).catch((e) => showInfo('PDF export failed', errorMessage(e)));
+  void exportLink(link, mode, tab).catch((e) => showInfo('PDF export failed', errorMessage(e)));
 }
 
-async function exportLink(
-  link: URL,
-  mode: ExportMode,
-  access: Promise<'granted' | 'denied' | 'unavailable'>,
-  tab?: chrome.tabs.Tab,
-): Promise<void> {
-  const granted = await access;
-  if (granted === 'denied') return; // the user said no
+/**
+ * The menu never asks for site access itself: the link could be on any site, and a grant must
+ * not be requested before the user sees which site it is for. Without access, the preview page
+ * opens and shows the site with an "Allow & export" button.
+ */
+async function exportLink(link: URL, mode: ExportMode, tab?: chrome.tabs.Tab): Promise<void> {
   const { site, user } = await siteForLink(link, tab);
   const settings = await loadSettings();
   const base = {
@@ -252,8 +252,7 @@ async function exportLink(
     userDisplayName: user,
   };
 
-  if (granted !== 'granted' && !(await hasSiteAccess(site.origin))) {
-    // No gesture-based prompt possible here: let the preview page ask ("Allow & export").
+  if (!(await hasSiteAccess(site.origin))) {
     const parsed = parseConfluenceUrl(link.href, site.contextPath);
     if (parsed.id && CONTENT_TYPES.has(parsed.kind)) {
       const type = parsed.kind as ContentType;
@@ -297,11 +296,12 @@ async function exportLink(
 // ───────────────────────────── permission granted (pending start) ─────────────────────────────
 
 async function onPermissionsAdded(perms: chrome.permissions.Permissions): Promise<void> {
+  refreshContextMenus();
   const pending = await getPendingStart();
   if (!pending || !patternsCoverOrigin(perms.origins, pending.request.site.origin)) return;
-  await clearPendingStart();
   try {
-    const jobId = await manager.startJob(pending.request, pending.pages);
+    // Same claim as the popup's `job/claimPending`: the export starts once, whoever is first.
+    const jobId = await manager.claimPendingStart(pending);
     if (pending.request.mode !== 'current') await manager.openJobPage(jobId, pending.request.sourceTabId);
   } catch (e) {
     await showInfo('PDF export failed', errorMessage(e));
@@ -312,6 +312,11 @@ async function onPermissionsAdded(perms: chrome.permissions.Permissions): Promis
 
 export default defineBackground(() => {
   void manager.init();
+
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name !== UI_PORT_NAME || port.sender?.id !== chrome.runtime.id || !isExtensionPage(port.sender)) return;
+    manager.handleUiPort(port);
+  });
 
   chrome.runtime.onMessage.addListener((msg: unknown, sender, sendResponse) => {
     if (sender.id !== chrome.runtime.id || !msg || typeof msg !== 'object') return false;
@@ -335,6 +340,7 @@ export default defineBackground(() => {
   chrome.permissions.onAdded.addListener((perms) => {
     void onPermissionsAdded(perms).catch(() => undefined);
   });
+  chrome.permissions.onRemoved.addListener(() => refreshContextMenus());
 
   chrome.notifications.onClicked.addListener((id) => {
     if (id === INFO_NOTIFICATION) {
@@ -350,6 +356,7 @@ export default defineBackground(() => {
   });
 
   chrome.runtime.onStartup.addListener(() => {
+    refreshContextMenus();
     void manager.init();
   });
 });

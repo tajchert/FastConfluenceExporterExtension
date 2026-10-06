@@ -120,6 +120,24 @@ describe('replaceUnsupportedContent', () => {
     expect(r.querySelector('#Page-anchor')).not.toBeNull();
   });
 
+  it('replaces an empty page-tree shell (filled by Confluence in the browser), keeps a rendered one', () => {
+    const shell = root(`
+      <div class="plugin_pagetree conf-macro output-block" data-macro-name="pagetree">
+        <fieldset class="hidden"><input type="hidden" name="treeId" value="1"/><input type="hidden" name="rootPage" value="Home"/></fieldset>
+        <ul class="plugin_pagetree_children_list"><li><ul class="plugin_pagetree_children"></ul></li></ul>
+      </div>`);
+    expect(replaceUnsupportedContent(shell, { pageUrl: PAGE_URL })).toBe(1);
+    const ph = shell.querySelector('.cf-placeholder')!;
+    expect(ph.textContent).toContain('Page tree');
+    expect(ph.querySelector('.cf-placeholder-open a')!.getAttribute('href')).toBe(PAGE_URL);
+
+    const rendered = root(`<div class="conf-macro output-block" data-macro-name="pagetree"><ul><li><a href="#">Child page</a></li></ul></div>`);
+    expect(replaceUnsupportedContent(rendered, { pageUrl: PAGE_URL })).toBe(0);
+    // Other list macros that are empty simply have no items: no placeholder noise.
+    const children = root(`<div class="conf-macro output-block" data-macro-name="children"></div>`);
+    expect(replaceUnsupportedContent(children, { pageUrl: PAGE_URL })).toBe(0);
+  });
+
   it('never creates links from non-http sources', () => {
     const r = root('<iframe src="javascript:alert(1)"></iframe>');
     replaceUnsupportedContent(r, { pageUrl: PAGE_URL });

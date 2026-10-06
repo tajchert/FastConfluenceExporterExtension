@@ -14,6 +14,8 @@ export interface ParsedConfluenceUrl {
   tinyCode?: string;
   /** DC `/display/KEY/Page+Title` URLs carry a title instead of an id. */
   title?: string;
+  /** DC blog post URLs `/display/KEY/YYYY/MM/DD/Title`: the posting day as `YYYY-MM-DD`. */
+  postingDay?: string;
   editor?: boolean;
 }
 
@@ -132,7 +134,8 @@ function parseSegments(raw: string[], q: URLSearchParams): ParsedConfluenceUrl |
     if (!raw[2]) return { kind: 'space', spaceKey };
     if (isDatePath(s2, s3, s4) && raw[5]) {
       const title = decodeDisplayTitle(raw[5]);
-      return title ? { kind: 'blogpost', spaceKey, title } : { kind: 'space', spaceKey };
+      const postingDay = `${s2}-${s3!.padStart(2, '0')}-${s4!.padStart(2, '0')}`;
+      return title ? { kind: 'blogpost', spaceKey, title, postingDay } : { kind: 'space', spaceKey };
     }
     const title = decodeDisplayTitle(raw[2]);
     return title ? { kind: 'page', spaceKey, title } : { kind: 'space', spaceKey };

@@ -50,7 +50,7 @@ Paste into *Notes for certification*:
 ```
 The extension exports Confluence pages to PDF locally in the browser. To test: open any Confluence Cloud page you can access (a free Atlassian Cloud site works), click the toolbar icon, choose "This page" and click Export. Edge asks once for access to that site. The PDF is saved to Downloads.
 
-The "debugger" permission is used only to call Page.printToPDF on a tab the extension opened itself; Edge shows the "started debugging this browser" bar while the PDF is printed. No host permissions are granted at install time: access is requested at runtime for one Confluence site at a time (optional_host_permissions), because Confluence can run on any domain (Atlassian Cloud, custom domains, self-hosted Data Center). No remote code, no analytics, no network requests other than read-only GETs to the Confluence site being exported.
+The "debugger" permission is used only to call Page.printToPDF on a tab the extension opened itself; Edge shows the "started debugging this browser" bar while the PDF is printed. No host permissions are granted at install time: access is requested at runtime for one Confluence site at a time (optional_host_permissions), because Confluence can run on any domain (Atlassian Cloud, custom domains, self-hosted Data Center). No remote code, no analytics. The extension's own requests are read-only GETs to the Confluence site being exported; images embedded in the exported pages load from wherever they are hosted (as when the page is viewed), without a referrer.
 ```
 
 ## Edge-specific behavior to be aware of

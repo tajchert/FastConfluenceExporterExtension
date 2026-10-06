@@ -17,6 +17,8 @@
     "test:watch": "vitest",
     "test:e2e": "npm run build:e2e && playwright test",
     "icons": "node scripts/generate-icons.mjs",
+    "licenses": "node scripts/generate-licenses.mjs",
+    "check:release": "node scripts/check-release.mjs && node scripts/generate-licenses.mjs --check",
     "postinstall": "wxt prepare"
   },
   "dependencies": {

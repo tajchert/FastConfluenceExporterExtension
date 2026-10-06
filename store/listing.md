@@ -79,7 +79,7 @@ WORKS WITH YOUR CONFLUENCE
 PRIVATE BY DESIGN
 • Everything happens on your device. No servers, no accounts, no API tokens.
 • Read-only: the extension only reads from Confluence and never changes anything.
-• No analytics, no tracking, no third-party requests.
+• No analytics, no tracking. Images embedded in your pages load from wherever they are hosted, just like when you view the page.
 • No access to any site until you allow it, one Confluence site at a time.
 • You can only export what you are already allowed to see.
 
@@ -173,7 +173,7 @@ Extension service workers cannot create blob: URLs. An offscreen document (reaso
 
 **Host permissions (optional_host_permissions: https://*/*, http://*/*)**
 ```
-No host permissions are granted at install time. Confluence can run on any domain: Atlassian Cloud (*.atlassian.net), Cloud custom domains, and self-hosted Data Center/Server instances on company domains (sometimes plain HTTP inside a company network). The extension can't know these domains in advance, so it declares them as optional and, when the user first exports from a site, calls chrome.permissions.request for that one origin only (e.g. https://wiki.example.com/*). Access is then used only to read content from that Confluence site with HTTP GET requests (same-origin, using the user's existing session), to open a background tab on that site for printing, and to load images from the same site. Users can review and revoke granted sites on the options page or in chrome://extensions.
+No host permissions are granted at install time. Confluence can run on any domain: Atlassian Cloud (*.atlassian.net), Cloud custom domains, and self-hosted Data Center/Server instances on company domains (sometimes plain HTTP inside a company network). The extension can't know these domains in advance, so it declares them as optional and, when the user first exports from a site, calls chrome.permissions.request for that one origin only (e.g. https://wiki.example.com/*). Access is then used only to read content from that Confluence site with HTTP GET requests (same-origin, using the user's existing session) and to open a background tab on that site for printing. While that tab builds the PDF, the browser loads the images and other resources embedded in the pages from wherever they are referenced (usually the same site; authors can also embed images from other hosts), as when the page is viewed; no referrer is sent with them. Users can review and revoke granted sites on the options page or in chrome://extensions.
 ```
 
 ### Remote code

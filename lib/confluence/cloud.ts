@@ -3,6 +3,7 @@
  * for tenants or content where a v2 endpoint is missing (404/400/405/501).
  */
 import type { ContentType, SiteInfo } from '../types';
+import { isAbortError } from '../util/abort';
 import { createPool } from '../util/pool';
 import {
   buildTreeOrder,
@@ -13,15 +14,20 @@ import {
   webUiUrl,
   type ConfluenceClient,
   type ContentSummary,
+  type DescendantsOptions,
+  type KnownPageInfo,
   type PageBody,
   type SpaceSummary,
+  type TitleLookup,
 } from './client';
 import { collectAll, getJson, HttpError, type HttpOptions } from './http';
 import {
   assertHasBody,
+  branchWarning,
   descendantsByChildren,
   pickByTitle,
   sortRoots,
+  titleQuery,
   userName,
   v1Body,
   v1Summary,
@@ -74,8 +80,11 @@ const COLLECTION: Record<ContentType, string> = {
   embed: 'embeds',
 };
 
-/** Order in which content types are tried when the type of an id is unknown. */
-const DISCOVERY_ORDER: ContentType[] = ['blogpost', 'folder', 'whiteboard', 'database', 'embed'];
+/**
+ * Order in which content types are tried when the type of an id is unknown (after v2 pages and
+ * v1 content; v1 content already covers blog posts).
+ */
+const DISCOVERY_ORDER: ContentType[] = ['folder', 'whiteboard', 'database', 'embed'];
 
 /** v2 descendants API limit. */
 const MAX_V2_DEPTH = 5;
@@ -85,6 +94,19 @@ const MAX_BREADCRUMB = 50;
 /** The endpoint (or the content under that type) does not exist → try a fallback. */
 function isMissing(e: unknown): boolean {
   return e instanceof HttpError && [400, 404, 405, 501].includes(e.status);
+}
+
+/** A definitive "no" (no access / does not exist): safe to remember. Anything else is transient. */
+function isDefinitive(e: unknown): boolean {
+  return e instanceof HttpError && (e.status === 403 || e.status === 404);
+}
+
+/** For optional lookups: an abort still propagates, any other failure becomes `undefined`. */
+function optional<T>(p: Promise<T>): Promise<T | undefined> {
+  return p.catch((e: unknown) => {
+    if (isAbortError(e)) throw e;
+    return undefined;
+  });
 }
 
 function str(v: Id | null | undefined): string | undefined {
@@ -125,34 +147,54 @@ export class CloudClient implements ConfluenceClient {
     return collectAll<T>(this.v1 + path, this.site, this.http);
   }
 
+  /** Caches successful lookups only: a rejected promise is evicted so the next call retries. */
   private cached<T>(map: Map<string, Promise<T>>, key: string, load: () => Promise<T>): Promise<T> {
     let p = map.get(key);
     if (!p) {
       p = load();
       map.set(key, p);
-      p.catch(() => map.delete(key));
+      p.catch(() => {
+        if (map.get(key) === p) map.delete(key);
+      });
     }
     return p;
   }
 
+  private seed(c: ContentSummary): void {
+    const key = `${c.type}:${c.id}`;
+    if (!this.contents.has(key)) this.contents.set(key, Promise.resolve(c));
+  }
+
   // ───────────────────────────── lookups ─────────────────────────────
 
+  /**
+   * Space key of a space id. Only a definitive answer is remembered (the key, or "none" for
+   * 403/404); transient failures (429 after retries, 5xx, network) reject and are retried by
+   * the next call instead of hiding the key — and the blocked-space policy — for the whole job.
+   */
   private spaceKeyOf(spaceId: string | undefined): Promise<string | undefined> {
     if (!spaceId) return Promise.resolve(undefined);
     return this.cached(this.spaceKeys, spaceId, () =>
       this.getV2<V2Space>(`/spaces/${encodeURIComponent(spaceId)}`).then(
         (s) => s.key,
-        () => undefined,
+        (e: unknown) => {
+          if (isDefinitive(e)) return undefined;
+          throw e;
+        },
       ),
     );
   }
 
+  /** Display name of an account (same caching rule as spaceKeyOf). */
   private userDisplayName(accountId: string | undefined): Promise<string | undefined> {
     if (!accountId) return Promise.resolve(undefined);
     return this.cached(this.users, accountId, () =>
       this.getV1<V1User>(`/user${qs({ accountId })}`).then(
         (u) => userName(u),
-        () => undefined,
+        (e: unknown) => {
+          if (isDefinitive(e)) return undefined;
+          throw e;
+        },
       ),
     );
   }
@@ -160,7 +202,7 @@ export class CloudClient implements ConfluenceClient {
   private async fromV2(raw: V2Content, type: ContentType, known?: { spaceKey?: string }): Promise<ContentSummary> {
     const id = String(raw.id);
     const spaceId = str(raw.spaceId);
-    const spaceKey = known?.spaceKey ?? (await this.spaceKeyOf(spaceId));
+    const spaceKey = known?.spaceKey ?? (await optional(this.spaceKeyOf(spaceId)));
     return {
       id,
       type: toContentType(raw.type) ?? type,
@@ -223,6 +265,7 @@ export class CloudClient implements ConfluenceClient {
   private async discover(id: string): Promise<ContentSummary> {
     let first: unknown;
     try {
+      // v2 pages, then v1 content (which also answers for blog posts).
       return await this.loadTyped(id, 'page');
     } catch (e) {
       if (!isMissing(e)) throw e;
@@ -239,54 +282,61 @@ export class CloudClient implements ConfluenceClient {
     throw first;
   }
 
+  /**
+   * Direct children in sidebar order. Uses `direct-children` (one level, one request per 250
+   * children); `hasChildren` stays unknown — the tree picker treats pages and folders as
+   * expandable and shows an empty level when there is nothing below.
+   */
   async getChildren(parent: { id: string; type: ContentType }): Promise<ContentSummary[]> {
     if (parent.type === 'blogpost') return [];
-    const info = await this.getContent(parent.id, parent.type).catch(() => null);
+    const info = await this.getContent(parent.id, parent.type).catch((e: unknown) => {
+      if (isAbortError(e)) throw e;
+      return null;
+    });
     const space = { spaceKey: info?.spaceKey, spaceId: info?.spaceId };
     const coll = COLLECTION[parent.type];
     const pid = encodeURIComponent(parent.id);
 
     let children: ContentSummary[];
     try {
-      // depth=2 also tells us which children have children (for the lazy tree picker).
-      const items = await this.listV2<V2TreeItem>(`/${coll}/${pid}/descendants${qs({ depth: 2, limit: 250 })}`);
-      const all = items.map((i) => this.treeItem(i, parent.id, space)).filter((x): x is ContentSummary => !!x);
-      const direct = all.filter((c) => (c.parentId ? c.parentId === parent.id : c.depth === 1));
-      const parents = new Set(all.map((c) => c.parentId));
-      children = direct.map((c) => ({ ...c, depth: undefined, hasChildren: parents.has(c.id) }));
+      const items = await this.listV2<V2TreeItem>(`/${coll}/${pid}/direct-children${qs({ limit: 250 })}`);
+      children = items
+        .map((i) => this.treeItem(i, parent.id, space))
+        .filter((x): x is ContentSummary => !!x)
+        .map((c) => ({ ...c, parentId: parent.id, depth: undefined }));
     } catch (e) {
       if (!isMissing(e)) throw e;
-      try {
-        const items = await this.listV2<V2TreeItem>(`/${coll}/${pid}/direct-children${qs({ limit: 250 })}`);
-        children = items
-          .map((i) => this.treeItem(i, parent.id, space))
-          .filter((x): x is ContentSummary => !!x)
-          .map((c) => ({ ...c, parentId: parent.id, depth: undefined }));
-      } catch (e2) {
-        if (!isMissing(e2)) throw e2;
-        if (parent.type !== 'page') return [];
-        const items = await this.listV1<V1Content>(
-          `/content/${pid}/child/page${qs({ expand: 'extensions.position,childTypes.page', limit: 200 })}`,
-        );
-        children = items.map((raw) => ({
-          ...v1Summary(raw, this.site, { ...space, parentId: parent.id }),
-          parentId: parent.id,
-        }));
-      }
+      if (parent.type !== 'page') return [];
+      const items = await this.listV1<V1Content>(
+        `/content/${pid}/child/page${qs({ expand: 'extensions.position,childTypes.page,space', limit: 200 })}`,
+      );
+      children = items.map((raw) => ({
+        ...v1Summary(raw, this.site, { ...space, parentId: parent.id }),
+        parentId: parent.id,
+      }));
     }
-    return children.map((c) => ({ ...c, parentType: parent.type })).sort(compareSiblings);
+    const out = children.map((c) => ({ ...c, parentType: parent.type })).sort(compareSiblings);
+    for (const c of out) this.seed(c);
+    return out;
   }
 
-  async getDescendants(parent: { id: string; type: ContentType }, maxDepth?: number): Promise<ContentSummary[]> {
+  async getDescendants(
+    parent: { id: string; type: ContentType; title?: string },
+    maxDepth?: number,
+    opts?: DescendantsOptions,
+  ): Promise<ContentSummary[]> {
     const limit = maxDepth === undefined ? Infinity : maxDepth;
     if (limit < 1 || parent.type === 'blogpost') return [];
-    const info = await this.getContent(parent.id, parent.type).catch(() => null);
+    const info = await this.getContent(parent.id, parent.type).catch((e: unknown) => {
+      if (isAbortError(e)) throw e;
+      return null;
+    });
     const space = { spaceKey: info?.spaceKey, spaceId: info?.spaceId };
     const pool = createPool(TREE_CONCURRENCY);
     const all: ContentSummary[] = [];
     const seen = new Set<string>([parent.id]);
 
-    const fetchFrom = async (node: { id: string; type: ContentType }, remaining: number): Promise<void> => {
+    const fetchFrom = async (node: { id: string; type: ContentType; title?: string }, remaining: number): Promise<void> => {
       const depth = Math.min(MAX_V2_DEPTH, remaining);
       let items: V2TreeItem[];
       try {
@@ -296,9 +346,11 @@ export class CloudClient implements ConfluenceClient {
           ),
         );
       } catch (e) {
-        // Below the root, a type without a descendants endpoint simply has no listable children.
-        if (node.id !== parent.id && isMissing(e)) return;
-        throw e;
+        if (node.id === parent.id || isAbortError(e)) throw e;
+        // Below the root, a type without a descendants endpoint simply has no listable children;
+        // any other failure skips that branch (reported) instead of failing the whole export.
+        if (!isMissing(e)) opts?.onWarning?.(branchWarning(node.title, e));
+        return;
       }
       const batch = items.map((i) => this.treeItem(i, node.id, space)).filter((x): x is ContentSummary => !!x);
       // Depth relative to `node`, computed from parentIds (the API's own `depth` field is not relied on).
@@ -312,13 +364,18 @@ export class CloudClient implements ConfluenceClient {
         rel.set(c.id, d);
         return d;
       };
-      const frontier: { id: string; type: ContentType }[] = [];
+      const frontier: { id: string; type: ContentType; title: string }[] = [];
       for (const c of batch) {
         if (seen.has(c.id)) continue;
         seen.add(c.id);
         all.push(c);
-        if (relDepth(c) >= depth && remaining > depth && c.type !== 'blogpost') frontier.push({ id: c.id, type: c.type });
+        this.seed({ ...c, depth: undefined });
+        if (relDepth(c) >= depth && remaining > depth && c.type !== 'blogpost') {
+          frontier.push({ id: c.id, type: c.type, title: c.title });
+        }
       }
+      // Every branch handles its own failures (only an abort rejects), so no sibling is left
+      // running unobserved after a rejection.
       await Promise.all(frontier.map((f) => fetchFrom(f, remaining - depth)));
     };
 
@@ -327,7 +384,7 @@ export class CloudClient implements ConfluenceClient {
     } catch (e) {
       if (!isMissing(e)) throw e;
       // Descendants API unavailable for this content: walk children level by level.
-      return descendantsByChildren(this, parent, maxDepth);
+      return descendantsByChildren(this, parent, maxDepth, opts);
     }
     return buildTreeOrder(parent.id, all, maxDepth);
   }
@@ -386,13 +443,14 @@ export class CloudClient implements ConfluenceClient {
     );
   }
 
-  async getPageBody(id: string, type: ContentType): Promise<PageBody> {
+  /**
+   * One request per page: v2 export_view. The space key, author name and breadcrumb come from
+   * cached lookups (one per space / author / ancestor for the whole job), not from a second
+   * request per page. v1 is only the fallback when the v2 endpoint is missing.
+   */
+  async getPageBody(id: string, type: ContentType, known?: KnownPageInfo): Promise<PageBody> {
     assertHasBody(type);
     const enc = encodeURIComponent(id);
-    // v1 gives space key, ancestor titles and the author name in one call; failures are tolerated.
-    const metaP = this.getV1<V1Content>(`/content/${enc}${qs({ expand: 'space,ancestors,version' })}`).catch(
-      () => null,
-    );
     let raw: V2Content;
     try {
       raw = await this.getV2<V2Content>(`/${COLLECTION[type]}/${enc}${qs({ 'body-format': 'export_view' })}`);
@@ -407,11 +465,12 @@ export class CloudClient implements ConfluenceClient {
         throw e;
       }
     }
-    const meta = await metaP;
-    const summary = await this.fromV2(raw, type, meta?.space?.key ? { spaceKey: meta.space.key } : undefined);
+    const summary = await this.fromV2(raw, type);
+    // Children of this page find their parent here when building their breadcrumb.
+    this.seed(summary);
     const [breadcrumb, author] = await Promise.all([
-      meta?.ancestors ? meta.ancestors.map((a) => a.title ?? String(a.id)) : this.breadcrumbFromParents(summary),
-      userName(meta?.version?.by) ?? this.userDisplayName(raw.version?.authorId ?? raw.authorId),
+      known?.breadcrumb ?? this.breadcrumbFromParents(summary),
+      optional(this.userDisplayName(raw.version?.authorId ?? raw.authorId)),
     ]);
     return {
       id: summary.id,
@@ -420,8 +479,8 @@ export class CloudClient implements ConfluenceClient {
       spaceKey: summary.spaceKey,
       spaceId: summary.spaceId,
       html: raw.body?.export_view?.value ?? '',
-      version: raw.version?.number ?? meta?.version?.number,
-      lastModified: raw.version?.createdAt ?? meta?.version?.when,
+      version: raw.version?.number,
+      lastModified: raw.version?.createdAt,
       authorDisplayName: author,
       breadcrumb,
       url: summary.url,
@@ -466,7 +525,13 @@ export class CloudClient implements ConfluenceClient {
     }
   }
 
-  async findPageByTitle(spaceKey: string, title: string): Promise<ContentSummary | null> {
+  async findPageByTitle(spaceKey: string, title: string, lookup?: TitleLookup): Promise<ContentSummary | null> {
+    if (lookup?.type === 'blogpost') {
+      // v1 supports the posting day, which disambiguates blog posts with the same title.
+      const res = await this.getV1<{ results?: V1Content[] }>(titleQuery(spaceKey, title, lookup));
+      const hit = pickByTitle(res.results ?? [], title);
+      return hit ? v1Summary(hit, this.site, { type: 'blogpost' }) : null;
+    }
     let space: SpaceSummary | null = null;
     try {
       space = await this.getSpace(spaceKey);
@@ -486,9 +551,7 @@ export class CloudClient implements ConfluenceClient {
         if (!isMissing(e)) throw e;
       }
     }
-    const res = await this.getV1<{ results?: V1Content[] }>(
-      `/content${qs({ spaceKey, title, type: 'page', expand: 'space,ancestors', limit: 10 })}`,
-    );
+    const res = await this.getV1<{ results?: V1Content[] }>(titleQuery(spaceKey, title));
     const hit = pickByTitle(res.results ?? [], title);
     return hit ? v1Summary(hit, this.site) : null;
   }

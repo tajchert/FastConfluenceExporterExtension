@@ -7,6 +7,8 @@
  * because export_view uses absolute same-origin URLs for images and page links.
  */
 
+import { hostileHtml } from './hostile.mjs';
+
 // ───────────────────────────── Cloud (context path /wiki) ─────────────────────────────
 
 export const CLOUD_SPACE = { id: '9001', key: 'TEST', name: 'Test Space', homepageId: '100' };
@@ -108,6 +110,15 @@ export const CLOUD_CONTENT = {
     '<text x="40" y="90" font-size="24">LIVE DIAGRAM</text></svg>' +
     '<p><a href="https://live.example/rendered-diagram">rendered by the page script</a></p>';
 }, 700);</script>`,
+  },
+  // Known HTML-injection vectors: if any of them ran in the worker tab, it would request
+  // /wiki/__pwned?v=N from this mock (recorded in the request log).
+  109: {
+    type: 'page',
+    title: 'Hostile Page',
+    parentId: '100',
+    position: 26,
+    body: () => hostileHtml((n) => `fetch('/wiki/__pwned?v=${n}')`),
   },
   500: { type: 'folder', title: 'Design Docs', parentId: '100', position: 30 },
   501: { type: 'page', title: 'API Design', parentId: '500', position: 5, body: () => simple('REST conventions.') },

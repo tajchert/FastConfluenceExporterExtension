@@ -81,6 +81,17 @@ const CHROME_SELECTORS = [
   '#feedback-dialog',
   '#inline-comments-highlight',
   '#space-tools-web-items',
+  // Title and byline: the export's own header sheet already shows them for this page, so the
+  // live print starts with the content instead of repeating them.
+  '[data-testid="title-text"]',
+  '[data-test-id="title-text"]',
+  '[data-testid="page-byline"]',
+  '[data-testid="content-byline"]',
+  '[data-testid="byline"]',
+  '[data-testid="page-metadata-banner"]',
+  '#title-heading',
+  '#title-text',
+  '.page-metadata',
 ];
 
 /** Elements that are only there while something is still loading. */

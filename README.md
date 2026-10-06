@@ -44,10 +44,11 @@ its breadcrumb and a checkbox so you can drop pages. You get a warning when an e
 
 - **Cover page**: title, source URL, export date, who exported it and the page count.
 - **Table of contents**: entries link to the pages inside the PDF.
-- **PDF bookmarks (outline)**: one bookmark per page, nested like the page tree.
+- **PDF bookmarks (outline)**: one bookmark per page, nested like the page tree, with each page's
+  headings below it.
 - **A new sheet for every page**, with a header block: title, breadcrumb, last-updated date and a link to the original.
 - **Internal links**: a link to another page that is also in the PDF jumps inside the PDF. Other links still point to Confluence.
-- **Page numbers** in the footer, and PDF metadata (title, author, subject).
+- **Page numbers** in the footer (the cover is not numbered), and PDF metadata (title, author, subject).
 - **Options**: paper size (A4, Letter, Legal, A3), orientation, margins, and toggles for the cover, TOC,
   page header blocks, page numbers, inline comment highlights, archived pages and shrinking wide
   tables. You can also add custom CSS for your own branding.
@@ -70,12 +71,20 @@ its breadcrumb and a checkbox so you can drop pages. You get a warning when an e
 **Convenience**
 
 - **Context menu** on links to Confluence pages: *Export this page to PDF* and *Export this page + children*.
+  It appears on Confluence-shaped links (`/wiki/…`, `*.atlassian.net`, `viewpage.action`) and on any
+  page link of a site you already allowed. For a site you have not allowed yet, the menu opens the
+  export page, which asks for access only after showing you which site it is.
 - **Progress view** that shows page X of N and the current page, with a **Cancel** button and a
-  summary of skipped or degraded pages at the end. A system notification appears when the
-  export finishes.
+  summary of skipped or degraded pages at the end. Cancel also stops a download that is waiting
+  in Chrome's "Save as" dialog, so a cancelled export never leaves a file behind. Collecting the
+  pages for the preview can be cancelled too. A system notification appears when the export
+  finishes.
 - **Robust**: if you can't view a page (403/404), it is skipped and listed in the summary, and the
-  rest of the export continues. When Confluence rate-limits requests (HTTP 429), the extension
-  backs off and retries automatically.
+  rest of the export continues; a branch of the tree that can't be listed is skipped and reported
+  the same way. When Confluence rate-limits requests (HTTP 429), the extension backs off, retries
+  automatically and shows "Throttled by Confluence, retrying…". A request that gets no answer
+  times out instead of hanging the export. If your session expires during an export, it stops
+  with a clear sign-in message.
 - **Enterprise ready**: you can force-install it and configure it with managed policy (blocked
   spaces, a page limit, default options, disabling live render). See [docs/ENTERPRISE.md](docs/ENTERPRISE.md).
 
@@ -85,8 +94,13 @@ its breadcrumb and a checkbox so you can drop pages. You get a warning when an e
   REST API **on the same site you are viewing**, using the session you are already logged in with.
 - **Read-only.** It only sends `GET` requests and never changes anything in Confluence.
 - **You only see what you can already see.** Confluence enforces your own permissions.
-- **No data leaves your device.** There is no analytics, telemetry or remote logging, and no
-  third-party requests. The PDF is saved straight to your downloads folder. See [PRIVACY.md](PRIVACY.md).
+- **No data leaves your device.** There is no analytics, telemetry or remote logging. The PDF is
+  saved straight to your downloads folder. See [PRIVACY.md](PRIVACY.md).
+- **Embedded resources load like in Confluence.** Images and other resources embedded in your
+  pages (attachments, emoji, avatars, images inserted from other websites) are loaded by the
+  browser while the PDF is built, from wherever the page references them — which can include
+  hosts outside your Confluence site, exactly as when you view the page. No referrer is sent with
+  those requests.
 - **Access per site.** The extension has no access to any website when you install it. The first
   time you export from a Confluence site, Chrome asks you to allow access to **that site only**.
   You can revoke access at any time on the options page or at `chrome://extensions`.
@@ -151,6 +165,8 @@ npm run build        # production build in .output/chrome-mv3
 npm run zip          # store-ready ZIP in .output/
 npm run zip:edge     # Edge Add-ons ZIP
 npm run icons        # regenerate icons + store images (needs a local Chrome, see scripts/generate-icons.mjs)
+npm run licenses     # regenerate public/THIRD_PARTY_LICENSES.txt after changing dependencies
+npm run check:release  # release gate: no template placeholders left, license notices up to date
 ```
 
 Architecture, module contracts and the API findings the implementation relies on are documented
@@ -170,7 +186,9 @@ tests/         unit (Vitest) and e2e (Playwright)
 ### Releasing
 
 1. Bump `version` in `package.json` and add an entry to [CHANGELOG.md](CHANGELOG.md).
-2. Run `npm run compile && npm test && npm run zip`.
+2. Run `npm run compile && npm test && npm run check:release && npm run zip`. The release check
+   fails while `PRIVACY.md` or the store listings still contain placeholders such as
+   `<your-email>` or `<owner>` (CI runs it for release tags).
 3. Upload `.output/*-chrome.zip` to the Chrome Web Store Developer Dashboard. The listing texts,
    permission justifications and privacy answers are in [store/listing.md](store/listing.md).
 4. For Edge, run `npm run zip:edge` and follow [store/edge-listing.md](store/edge-listing.md).
@@ -204,9 +222,12 @@ The extension does **not** request the `tabs`, `cookies`, `history`, `webRequest
 - **Chromium only.** Firefox and Safari don't support the APIs this extension needs.
 - **Whiteboards, databases and embeds** are listed as links, not rendered.
 - **Not pixel-identical** to Confluence's own PDF themes. Use custom CSS in the options to adjust styling.
-- **Very large exports** (several hundred pages) are printed in batches to keep memory in check.
-  They still take a few minutes and need enough free memory.
-- **Draft and archived pages** are excluded by default. Archived pages can be included in the options.
+- **Very large exports** (several hundred pages) are printed in batches (at most 400 pages per
+  print) to keep memory in check. Links and table-of-contents entries work across batches. They
+  still take a few minutes and need enough free memory.
+- **Linked pages** (2 hops) stop following links after 2,000 items (or your administrator's page
+  limit) and say so in the preview.
+- **Draft pages** are never exported. **Archived pages** are excluded by default and can be included in the options.
 - Attachments that aren't images (for example Office files or ZIPs) are not embedded. Links to them stay in the PDF.
 
 ## Troubleshooting
@@ -220,10 +241,11 @@ The extension does **not** request the `tabs`, `cookies`, `history`, `webRequest
 | Images are grey boxes with a filename | The image could not be loaded (deleted, no permission, or a timeout). Check that you can open the image in Confluence and try again. |
 | A diagram or chart is missing | Turn on **Live render**. If the macro isn't detected, add its name to the live-render macro list in the options. |
 | "Throttled by Confluence, retrying…" | Confluence is rate-limiting requests. The export continues on its own. Lower *API concurrency* in the options if it happens often. |
-| Pages listed as *skipped* | You don't have permission to view them, or they were deleted, archived or are drafts. |
-| You are logged out or SSO expired | Log in to Confluence in a normal tab, then export again. |
+| Pages listed as *skipped* | You don't have permission to view them, or they were deleted, archived or are drafts. With a managed list of blocked spaces, a linked page whose space can't be determined is skipped as well. |
+| You are logged out or SSO expired | The export stops with a sign-in message. Log in to Confluence in a normal tab, then export again. |
+| "An export helper tab was closed" | The extension prints from a background tab next to your page (and, for live render, a few more). Closing it (or its window) stops the export. Leave these tabs alone until the export finishes; they close themselves. |
 | The keyboard shortcut does nothing | Another extension may use **Alt+Shift+P**. Change the shortcut at `chrome://extensions/shortcuts`. |
-| The export stops when the computer sleeps or the browser closes | Start it again. Exports are not resumed across browser restarts. |
+| The export stops when the computer sleeps or the browser closes | Start it again. If Chrome stopped the extension in the background, **Try again** on the export page restarts it with the same pages (no new collection). Exports are not resumed across browser restarts. |
 
 If the problem persists, open an issue with your Chrome version, Confluence flavour (Cloud or Data
 Center plus version) and the error summary shown in the progress view. Please don't include page
@@ -232,3 +254,7 @@ content or other confidential information.
 ## License
 
 [MIT](LICENSE) © 2026 Michal Tajchert
+
+The extension bundles open-source libraries (DOMPurify, pdf-lib, pako, fflate, Preact and their
+dependencies). Their license notices ship with the extension in
+[`THIRD_PARTY_LICENSES.txt`](public/THIRD_PARTY_LICENSES.txt), linked from the options page.

@@ -3,14 +3,17 @@
  * and web fonts are ready, so `Page.printToPDF` never captures half-loaded content.
  *
  * Note: the worker tab is a background tab; `img.decode()` and requestAnimationFrame can stall
- * there, so success is judged from load/error events and `complete`/`naturalWidth`, and decode()
- * is only awaited with a short cap.
+ * there, so success is judged from load/error events and `complete`/`naturalWidth`. Loaded
+ * images are printed fine (Chrome decodes them at print time); decode() is only awaited, with a
+ * short cap, for very large bitmaps and for SVGs that report no intrinsic size.
  */
 
 import { refreshLayoutMarks } from './document';
 
 const DEFAULT_TIMEOUT_MS = 15000;
-const DECODE_CAP_MS = 1500;
+const DECODE_CAP_MS = 300;
+/** Bitmaps above this many pixels get a (capped) decode before printing. */
+const LARGE_BITMAP_PIXELS = 4_000_000;
 const FONTS_CAP_MS = 3000;
 
 function delay(ms: number): Promise<void> {
@@ -154,12 +157,17 @@ export async function waitForAssets(
     } else failed.push(img);
   });
 
-  // Decode loaded images so large bitmaps are not printed blank; capped for background tabs.
-  if (loaded.length > 0) {
-    const cap = Math.min(DECODE_CAP_MS, Math.max(200, deadline - Date.now()));
-    const results = await Promise.all(loaded.map((img) => decodes(img, cap)));
+  // Decode only what may need it: very large bitmaps (so they are not printed blank) and SVGs
+  // without an intrinsic size (decode() tells whether they are fine). Capped for background tabs;
+  // a fully loaded image of ordinary size costs no wait at all.
+  const toDecode = loaded.filter(
+    (img) => !(img.naturalWidth > 0) || img.naturalWidth * img.naturalHeight > LARGE_BITMAP_PIXELS,
+  );
+  if (toDecode.length > 0) {
+    const cap = Math.min(DECODE_CAP_MS, Math.max(100, deadline - Date.now()));
+    const results = await Promise.all(toDecode.map((img) => decodes(img, cap)));
     results.forEach((ok, i) => {
-      const img = loaded[i]!;
+      const img = toDecode[i]!;
       if (!ok && !(img.naturalWidth > 0)) failed.push(img);
     });
   }

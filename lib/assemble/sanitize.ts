@@ -423,10 +423,16 @@ function stripActiveContent(root: Element): void {
   }
 }
 
+/** `url(javascript:…)` / `url(vbscript:…)` in inline styles (inert in Chrome, removed anyway). */
+const SCRIPT_URL_IN_CSS = /url\(\s*(['"]?)\s*(java|vb)script:/i;
+
 function cleanInlineStyles(root: Element): void {
   for (const el of Array.from(root.querySelectorAll('[style]')) as HTMLElement[]) {
     const style = el.style;
     if (!style) continue;
+    for (const p of Array.from(style)) {
+      if (SCRIPT_URL_IN_CSS.test(style.getPropertyValue(p).replace(/[\u0000-\u0020]+/g, ' '))) style.removeProperty(p);
+    }
     if (DANGEROUS_POSITIONS.has((style.getPropertyValue('position') || '').trim().toLowerCase())) {
       for (const p of ['position', 'top', 'right', 'bottom', 'left', 'z-index', 'inset']) style.removeProperty(p);
     }

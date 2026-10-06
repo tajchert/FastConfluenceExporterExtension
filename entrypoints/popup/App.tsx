@@ -1,10 +1,12 @@
 import type { JSX } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { Button } from '../../components/Button';
-import { errorMessage, onJobUpdate, openJobTab, showDownload, useJob } from '../../components/hooks';
+import { collectPages } from '../../components/collectClient';
+import { errorMessage, openJobTab, showDownload, useJob } from '../../components/hooks';
 import { Icon, Spinner } from '../../components/Icon';
 import { JobProgress } from '../../components/JobProgress';
 import { formatDate, isJobActive, isRestrictedUrl, plural, TYPE_LABEL } from '../../components/logic';
+import type { PendingStartPayload } from '../../lib/messages';
 import { Notice } from '../../components/Notice';
 import { Select } from '../../components/Select';
 import { Toggle } from '../../components/Toggle';
@@ -33,13 +35,6 @@ type Phase =
   | { kind: 'ready'; ctx: PageContext; tabId: number };
 
 const PROBE_TIMEOUT_MS = 12_000;
-/** How long to let the service worker pick up `pendingStart` after a grant before starting ourselves. */
-const PENDING_HANDOFF_MS = 400;
-
-interface PendingStart {
-  request: ExportRequest;
-  createdAt: number;
-}
 
 async function probeActiveTab(): Promise<Phase> {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -99,7 +94,7 @@ export function App(): JSX.Element {
         <span class="brand-mark" aria-hidden="true">
           <Icon name="pdf" size={16} />
         </span>
-        <span class="app-title">Confluence → PDF</span>
+        <span class="app-title">Fast PDF Export</span>
         <Button variant="ghost" icon="gear" label="Settings" onClick={openOptions} />
       </header>
       {phase.kind === 'loading' || (phase.kind === 'ready' && !settings) ? (
@@ -209,20 +204,23 @@ function Ready({
     [ctx, depth, linkDepth, settings, cover, toc, live, liveLocked, tabId],
   );
 
-  // Page count for "Preview (N pages)": only cheap, bounded modes and only with site access
-  // (the collector runs in a background worker tab on the Confluence origin).
-  const countKey = mode && (mode === 'subtree' || mode === 'folder' || mode === 'linked') ? `${mode}:${depth}:${linkDepth}` : '';
+  // Page count for "Preview (N pages)", only with site access (the collector runs in a background
+  // worker tab on the Confluence origin). Linked depth 2 can fan out to thousands of requests, so
+  // it is not counted here. The service worker keeps the result briefly, so the preview reuses it
+  // instead of collecting again; closing the popup cancels a running count.
+  const countKey =
+    mode && (mode === 'subtree' || mode === 'folder' || (mode === 'linked' && linkDepth === 1)) ? `${mode}:${depth}:${linkDepth}` : '';
   useEffect(() => {
     if (!countKey || access !== true || !mode || blocked) return;
-    let alive = true;
+    const controller = new AbortController();
     const t = setTimeout(() => {
-      callSw({ type: 'collect', request: makeRequest(mode) }).then(
-        (r) => alive && setCount({ key: countKey, n: r.pages.length }),
+      collectPages(makeRequest(mode), { signal: controller.signal }).then(
+        (r) => !controller.signal.aborted && setCount({ key: countKey, n: r.pages.length }),
         () => undefined,
       );
     }, 350);
     return () => {
-      alive = false;
+      controller.abort();
       clearTimeout(t);
     };
     // makeRequest also changes with toggles that do not affect the count; countKey covers the rest.
@@ -234,37 +232,13 @@ function Ready({
   };
 
   /**
-   * After a permission grant the service worker may already have started the pending export
-   * (chrome.permissions.onAdded). Give it a moment; start ourselves only if it did not.
+   * After a permission grant the service worker may already be starting the pending export
+   * (chrome.permissions.onAdded). Both go through one claim in the service worker, keyed by the
+   * pending start, so the export starts exactly once and we get its job.
    */
-  const handoffAfterGrant = async (pending: PendingStart) => {
-    const adopted: { id: string | null } = { id: null };
-    const off = onJobUpdate((job) => {
-      if (
-        job.createdAt >= pending.createdAt &&
-        job.request.root.id === pending.request.root.id &&
-        job.request.site.origin === origin
-      ) {
-        adopted.id = job.id;
-      }
-    });
-    await new Promise((r) => setTimeout(r, PENDING_HANDOFF_MS));
-    off();
-    if (adopted.id) {
-      setJobId(adopted.id);
-      return;
-    }
-    const stored = (await chrome.storage.session.get('pendingStart')) as { pendingStart?: PendingStart };
-    if (stored.pendingStart && stored.pendingStart.createdAt === pending.createdAt) {
-      await chrome.storage.session.remove('pendingStart');
-      await startJob(pending.request);
-      return;
-    }
-    // Consumed by the service worker: find the job it started.
-    const jobs = await callSw({ type: 'job/list' });
-    const job = jobs.find((j) => j.createdAt >= pending.createdAt && j.request.root.id === pending.request.root.id);
-    if (job) setJobId(job.id);
-    else await startJob(pending.request);
+  const handoffAfterGrant = async (pending: PendingStartPayload) => {
+    const { jobId: id } = await callSw({ type: 'job/claimPending', pending });
+    setJobId(id);
   };
 
   const onExport = () => {
@@ -295,7 +269,7 @@ function Ready({
     // No site access yet. The permission prompt may close this popup, so leave the request for the
     // service worker first (fire-and-forget) and call permissions.request synchronously within
     // this user gesture.
-    const pending: PendingStart = { request, createdAt: Date.now() };
+    const pending: PendingStartPayload = { request, createdAt: Date.now() };
     const stored = chrome.storage.session.set({ pendingStart: pending }).catch(() => undefined);
     setBusy(true);
     requestSiteAccess(origin)
@@ -450,7 +424,10 @@ function RunningJob({ jobId }: { jobId: string }): JSX.Element {
 
 const RECENT_MS = 30 * 60 * 1000;
 
-/** Compact status line for the most recent export (running, or finished in the last 30 min). */
+/**
+ * Compact status line for the most recent export: running, or finished (also failed or
+ * cancelled) in the last 30 min — with notifications off, this is where a failure shows up.
+ */
 function LastJob({ hideId }: { hideId: string | null }): JSX.Element | null {
   const [job, setJob] = useState<ExportJobState | null>(null);
   const jobRef = useRef<ExportJobState | null>(null);
@@ -475,20 +452,26 @@ function LastJob({ hideId }: { hideId: string | null }): JSX.Element | null {
   if (!job || job.id === hideId) return null;
   const active = isJobActive(job.status);
   const recent = (job.finishedAt ?? job.createdAt) > Date.now() - RECENT_MS;
-  if (!active && !(job.status === 'done' && recent)) return null;
+  if (!active && !recent) return null;
   const title = job.request.root.title || job.request.root.spaceKey || 'Export';
+  const failed = job.status === 'error';
+  const counting = active && job.progress.total > 0 && job.progress.unit !== 'step';
 
   return (
-    <div class="last-job" role="status">
-      {active ? <Spinner size={12} /> : <Icon name="checkCircle" size={14} />}
+    <div class={`last-job${failed ? ' is-error' : ''}`} role="status">
+      {active ? <Spinner size={12} /> : <Icon name={failed ? 'alert' : job.status === 'cancelled' ? 'x' : 'checkCircle'} size={14} />}
       <span class="grow">
         {active
-          ? `Exporting “${title}”${job.progress.total ? ` · ${Math.min(job.progress.done, job.progress.total)}/${job.progress.total}` : '…'}`
-          : `Last export: ${job.result?.filename ?? title}`}
+          ? `Exporting “${title}”${counting ? ` · ${Math.min(job.progress.done, job.progress.total)}/${job.progress.total}` : '…'}`
+          : failed
+            ? `Export of “${title}” failed`
+            : job.status === 'cancelled'
+              ? `Export of “${title}” was cancelled`
+              : `Last export: ${job.result?.filename ?? title}`}
       </span>
-      {active ? (
+      {active || failed ? (
         <button type="button" class="link-btn" onClick={() => void openJobTab(job.id).then(() => window.close())}>
-          View
+          {active ? 'View' : 'Details'}
         </button>
       ) : job.result?.downloadId !== undefined ? (
         <button type="button" class="link-btn" onClick={() => void showDownload(job.result?.downloadId)}>

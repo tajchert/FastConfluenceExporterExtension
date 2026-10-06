@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { contentIdFromUrl, sanitizePageHtml, type SanitizeContext } from '../../lib/assemble/sanitize';
+import { hostileHtml } from '../e2e/mock-confluence/hostile.mjs';
 import {
   CODE,
   COMMENTED,
@@ -51,6 +52,20 @@ describe('sanitizePageHtml', () => {
     expect(host.querySelector('script, style, iframe, form, input, button')).toBeNull();
     expect(host.innerHTML).not.toMatch(/onclick|javascript:|__pwned/);
     expect((window as unknown as { __pwned?: boolean }).__pwned).toBeUndefined();
+  });
+
+  it('neutralizes known injection vectors (fast check; the E2E suite repeats it in Chromium)', () => {
+    const host = render(hostileHtml((n) => `window.__pwned=${n}`));
+    expect(host.querySelector('script, iframe, object, embed, base, meta, form, input, button, template, noscript')).toBeNull();
+    for (const el of Array.from(host.querySelectorAll('*'))) {
+      for (const attr of Array.from(el.attributes)) {
+        expect(attr.name, `${el.tagName} ${attr.name}`).not.toMatch(/^on/i);
+        expect(attr.value, `${el.tagName} ${attr.name}`).not.toMatch(/^\s*(java\s*script|data):/i);
+      }
+    }
+    expect(host.innerHTML).not.toMatch(/javascript:/i);
+    expect(host.textContent).toContain('End of the hostile page.');
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
   });
 
   it('keeps inline styles but drops absolute/fixed positioning', () => {

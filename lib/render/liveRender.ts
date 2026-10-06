@@ -11,7 +11,9 @@ import type { ExportOptions, PageRef } from '../types';
 import { printTabToPdf, toPrintParams, type PrintHooks } from './cdp';
 import {
   closeTabQuietly,
+  LIVE_TAB_MARKER,
   LoginRequiredError,
+  markUrl,
   openBackgroundTab,
   scriptingError,
   waitForTabComplete,
@@ -102,7 +104,7 @@ async function renderOne(page: PageRef, o: LiveRenderOptions): Promise<Uint8Arra
   const customCss = `${livePageCss(o.options)}\n${o.options.customCss ?? ''}`;
   const params = toPrintParams(o.options);
 
-  const tabId = await openBackgroundTab(page.url, o.nearTabId);
+  const tabId = await openBackgroundTab(markUrl(page.url, LIVE_TAB_MARKER), o.nearTabId);
   try {
     const tab = await waitForTabComplete(tabId, PAGE_LOAD_TIMEOUT_MS, signal);
     assertSameSite(tab, page.url);

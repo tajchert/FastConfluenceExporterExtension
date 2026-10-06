@@ -113,22 +113,39 @@ describe('CloudClient', () => {
     expect(limited.map((x) => x.id)).toEqual(['2b', '2', '3b', '3']);
   });
 
-  it('getChildren reports hasChildren from a depth-2 descendants call', async () => {
-    route((u) => {
+  it('getChildren lists one level with direct-children (no grandchildren listing)', async () => {
+    const seen = route((u) => {
       if (u.pathname === '/wiki/api/v2/pages/1') return { body: { id: '1', title: 'Root', spaceId: '77' } };
       if (u.pathname === '/wiki/api/v2/spaces/77') return { body: { id: '77', key: 'ENG' } };
-      return descendantsHandler(u);
+      if (u.pathname === '/wiki/api/v2/pages/1/direct-children')
+        return {
+          body: {
+            results: [
+              { id: '2', title: 'T2', type: 'page', status: 'current', childPosition: 20 },
+              { id: '2b', title: 'T2b', type: 'page', status: 'current', childPosition: 10 },
+            ],
+            _links: {},
+          },
+        };
+      return undefined;
     });
-    const kids = await new CloudClient(cloud).getChildren({ id: '1', type: 'page' });
-    expect(kids.map((k) => [k.id, k.hasChildren])).toEqual([
-      ['2b', false],
-      ['2', true],
+    const c = new CloudClient(cloud);
+    const kids = await c.getChildren({ id: '1', type: 'page' });
+    expect(kids.map((k) => [k.id, k.hasChildren, k.spaceKey, k.parentId])).toEqual([
+      ['2b', undefined, 'ENG', '1'],
+      ['2', undefined, 'ENG', '1'],
     ]);
+    expect(seen.some((s) => s.includes('/descendants'))).toBe(false);
+    // Children are remembered: looking one up again costs no request.
+    const before = seen.length;
+    await expect(c.getContent('2', 'page')).resolves.toMatchObject({ id: '2', title: 'T2', parentId: '1' });
+    expect(seen.length).toBe(before);
   });
 
-  it('getPageBody combines v2 body with v1 metadata', async () => {
-    route((u) => {
-      if (u.pathname === '/wiki/api/v2/pages/5')
+  it('getPageBody: one v2 request per page, breadcrumb/author/space from cached lookups', async () => {
+    const seen = route((u) => {
+      const p = u.pathname;
+      if (p === '/wiki/api/v2/pages/5')
         return {
           body: {
             id: '5',
@@ -142,20 +159,26 @@ describe('CloudClient', () => {
             _links: { webui: '/spaces/ENG/pages/5/Five' },
           },
         };
-      if (u.pathname === '/wiki/rest/api/content/5')
+      if (p === '/wiki/api/v2/pages/4') return { body: { id: '4', title: 'Four', spaceId: '77', parentId: '1', parentType: 'page' } };
+      if (p === '/wiki/api/v2/pages/1') return { body: { id: '1', title: 'Home', spaceId: '77' } };
+      if (p === '/wiki/api/v2/pages/6')
         return {
           body: {
-            id: '5',
-            type: 'page',
-            title: 'Five',
-            space: { key: 'ENG', id: 77 },
-            version: { number: 3, by: { displayName: 'Ada Lovelace' } },
-            ancestors: [{ id: '1', title: 'Home' }, { id: '4', title: 'Four' }],
+            id: '6',
+            title: 'Six',
+            spaceId: '77',
+            parentId: '4',
+            parentType: 'page',
+            version: { number: 1, authorId: 'acc-1' },
+            body: { export_view: { value: '<p>6</p>' } },
           },
         };
+      if (p === '/wiki/api/v2/spaces/77') return { body: { id: '77', key: 'ENG' } };
+      if (p === '/wiki/rest/api/user' && u.searchParams.get('accountId') === 'acc-1') return { body: { displayName: 'Ada Lovelace' } };
       return undefined;
     });
-    const b = await new CloudClient(cloud).getPageBody('5', 'page');
+    const c = new CloudClient(cloud);
+    const b = await c.getPageBody('5', 'page');
     expect(b).toMatchObject({
       id: '5',
       title: 'Five',
@@ -167,6 +190,53 @@ describe('CloudClient', () => {
       breadcrumb: ['Home', 'Four'],
       url: 'https://acme.atlassian.net/wiki/spaces/ENG/pages/5/Five',
     });
+    expect(seen.filter((s) => s.startsWith('/wiki/rest/api/content'))).toEqual([]);
+    // A sibling shares the space, author and ancestors: only its own body is requested.
+    const before = seen.length;
+    await expect(c.getPageBody('6', 'page')).resolves.toMatchObject({ breadcrumb: ['Home', 'Four'], authorDisplayName: 'Ada Lovelace', spaceKey: 'ENG' });
+    expect(seen.slice(before)).toEqual(['/wiki/api/v2/pages/6?body-format=export_view']);
+    // A known breadcrumb skips the ancestor walk entirely.
+    const c2 = new CloudClient(cloud);
+    await expect(c2.getPageBody('5', 'page', { breadcrumb: ['X'] })).resolves.toMatchObject({ breadcrumb: ['X'] });
+  });
+
+  it('does not remember a transient space-key failure, but remembers a 404', async () => {
+    let spaceCalls = 0;
+    let fail = true;
+    route((u) => {
+      const p = u.pathname;
+      const m = /^\/wiki\/api\/v2\/pages\/(\d+)$/.exec(p);
+      if (m) return { body: { id: m[1], title: `P${m[1]}`, spaceId: m[1] === '9' ? '99' : '77' } };
+      if (p === '/wiki/api/v2/spaces/77') {
+        spaceCalls++;
+        return fail ? { status: 503, body: { message: 'busy' } } : { body: { id: '77', key: 'ENG' } };
+      }
+      return undefined; // space 99: 404
+    });
+    const c = new CloudClient(cloud, { maxRetries: 0 });
+    await expect(c.getContent('1', 'page')).resolves.toMatchObject({ spaceKey: undefined });
+    fail = false;
+    await expect(c.getContent('2', 'page')).resolves.toMatchObject({ spaceKey: 'ENG' });
+    await expect(c.getContent('3', 'page')).resolves.toMatchObject({ spaceKey: 'ENG' });
+    expect(spaceCalls).toBe(2);
+    await expect(c.getContent('9', 'page')).resolves.toMatchObject({ spaceKey: undefined });
+  });
+
+  it('getDescendants skips a branch whose listing fails and reports it', async () => {
+    const seen = route((u) => {
+      if (u.pathname === '/wiki/api/v2/pages/1') return { body: { id: '1', title: 'Root', spaceId: '77' } };
+      if (u.pathname === '/wiki/api/v2/spaces/77') return { body: { id: '77', key: 'ENG' } };
+      if (u.pathname === '/wiki/api/v2/pages/6/descendants') return { status: 500, body: { message: 'boom' } };
+      return descendantsHandler(u);
+    });
+    const warnings: string[] = [];
+    const all = await new CloudClient(cloud, { maxRetries: 0 }).getDescendants({ id: '1', type: 'page' }, undefined, {
+      onWarning: (w) => warnings.push(w),
+    });
+    expect(all.map((x) => x.id)).toContain('6');
+    expect(all.map((x) => x.id)).not.toContain('7');
+    expect(warnings).toEqual(['Could not list the pages under “T6” (HTTP 500); that branch was skipped.']);
+    expect(seen.some((s) => s.startsWith('/wiki/api/v2/pages/6b/descendants'))).toBe(true);
   });
 
   it('getPageBody falls back to v2 lookups when v1 metadata is unavailable', async () => {
@@ -225,11 +295,36 @@ describe('CloudClient', () => {
         };
       if (u.pathname === '/wiki/api/v2/pages' && u.searchParams.get('space-id') === '77')
         return { body: { results: [{ id: '30', title: u.searchParams.get('title'), spaceId: '77', status: 'current' }] } };
+      if (u.pathname === '/wiki/rest/api/content' && u.searchParams.get('type') === 'blogpost')
+        return {
+          body: {
+            results: [{ id: '40', type: 'blogpost', title: u.searchParams.get('title'), space: { key: 'ENG' } }],
+            start: 0,
+            limit: 10,
+            size: 1,
+          },
+        };
       return undefined;
     });
     const c = new CloudClient(cloud);
     expect((await c.getSpaceRoots({ key: 'ENG' })).map((r) => r.id)).toEqual(['20', '10']);
     await expect(c.findPageByTitle('ENG', 'Design Doc')).resolves.toMatchObject({ id: '30', spaceKey: 'ENG' });
+    await expect(c.findPageByTitle('ENG', 'Launch', { type: 'blogpost', postingDay: '2026-10-01' })).resolves.toMatchObject({
+      id: '40',
+      type: 'blogpost',
+    });
+  });
+
+  it('discovers an untyped id without asking the v2 blog post endpoint', async () => {
+    const seen = route((u) => {
+      if (u.pathname === '/wiki/rest/api/content/12') return { body: { id: '12', type: 'blogpost', title: 'News', space: { key: 'ENG' } } };
+      return undefined;
+    });
+    await expect(new CloudClient(cloud).getContent('12')).resolves.toMatchObject({ id: '12', type: 'blogpost' });
+    expect(seen.some((s) => s.includes('/blogposts/'))).toBe(false);
+    const seen2 = route(() => undefined);
+    await expect(new CloudClient(cloud).getContent('13')).rejects.toThrow();
+    expect(seen2.filter((s) => s.includes('/blogposts/'))).toEqual([]);
   });
 });
 
@@ -240,22 +335,24 @@ describe('ServerClient', () => {
       if (m) {
         const kids: Record<string, unknown[]> = {
           '1': [
-            { id: 12, type: 'page', title: 'beta', extensions: { position: 'none' } },
-            { id: 11, type: 'page', title: 'Zulu', extensions: { position: 0 } },
-            { id: 13, type: 'page', title: 'Alpha', extensions: {} },
+            { id: 12, type: 'page', title: 'beta', extensions: { position: 'none' }, space: { key: 'OPS', id: 5 } },
+            { id: 11, type: 'page', title: 'Zulu', extensions: { position: 0 }, space: { key: 'OPS', id: 5 } },
+            { id: 13, type: 'page', title: 'Alpha', extensions: {}, space: { key: 'OPS', id: 5 } },
           ],
-          '11': [{ id: 111, type: 'page', title: 'Child' }],
+          '11': [{ id: 111, type: 'page', title: 'Child', space: { key: 'OPS', id: 5 } }],
         };
+        if (m[1] === '13') return { status: 500, body: { message: 'boom' } };
         return { body: { results: kids[m[1]!] ?? [], start: 0, limit: 200, size: (kids[m[1]!] ?? []).length } };
       }
-      if (u.pathname === '/confluence/rest/api/content/1')
-        return { body: { id: 1, type: 'page', title: 'Root', space: { key: 'OPS', id: 5 } } };
       return undefined;
     });
-    const c = new ServerClient(dc);
+    const c = new ServerClient(dc, { maxRetries: 0 });
     expect((await c.getChildren({ id: '1', type: 'page' })).map((x) => x.title)).toEqual(['Zulu', 'Alpha', 'beta']);
-    const all = await c.getDescendants({ id: '1', type: 'page' });
+    const warnings: string[] = [];
+    const all = await c.getDescendants({ id: '1', type: 'page' }, undefined, { onWarning: (w) => warnings.push(w) });
     expect(all.map((x) => `${x.id}@${x.depth}`)).toEqual(['11@1', '111@2', '13@1', '12@1']);
+    // "Alpha" (13) could not be listed: its branch is skipped, the walk goes on.
+    expect(warnings).toEqual(['Could not list the pages under “Alpha” (HTTP 500); that branch was skipped.']);
     expect(all[0]!.spaceKey).toBe('OPS');
     expect(all[0]!.url).toBe('https://intranet.example.org/confluence/pages/viewpage.action?pageId=11');
     expect(await c.getChildren({ id: '1', type: 'blogpost' })).toEqual([]);
@@ -307,5 +404,43 @@ describe('ServerClient', () => {
     await expect(c.getSpace('OPS')).resolves.toEqual({ id: '5', key: 'OPS', name: 'Operations', homepageId: '2' });
     await expect(c.getCurrentUser()).resolves.toEqual({ displayName: 'Linus' });
     await expect(c.getPageBody('7', 'folder')).rejects.toThrow(/no exportable body/);
+  });
+
+  it('remembers the ancestor chain of a content, so walking up costs no requests', async () => {
+    const seen = route((u) => {
+      if (u.pathname === '/confluence/rest/api/content/7')
+        return {
+          body: {
+            id: 7,
+            type: 'page',
+            title: 'Seven',
+            space: { key: 'OPS', id: 5 },
+            ancestors: [
+              { id: 1, type: 'page', title: 'Root' },
+              { id: 3, type: 'page', title: 'Three' },
+            ],
+          },
+        };
+      return undefined;
+    });
+    const c = new ServerClient(dc);
+    await expect(c.getContent('7')).resolves.toMatchObject({ parentId: '3' });
+    await expect(c.getContent('3')).resolves.toMatchObject({ title: 'Three', parentId: '1', spaceKey: 'OPS' });
+    await expect(c.getContent('1')).resolves.toMatchObject({ title: 'Root', parentId: undefined });
+    expect(seen).toHaveLength(1);
+  });
+
+  it('looks up blog posts by title and posting day', async () => {
+    const seen = route((u) => {
+      if (u.pathname === '/confluence/rest/api/content')
+        return { body: { results: [{ id: 9, type: 'blogpost', title: 'Launch' }], start: 0, limit: 10, size: 1 } };
+      return undefined;
+    });
+    await expect(new ServerClient(dc).findPageByTitle('OPS', 'Launch', { type: 'blogpost', postingDay: '2026-10-01' })).resolves.toMatchObject({
+      id: '9',
+      type: 'blogpost',
+    });
+    expect(seen[0]).toContain('type=blogpost');
+    expect(seen[0]).toContain('postingDay=2026-10-01');
   });
 });

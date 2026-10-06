@@ -4,17 +4,21 @@
  */
 import type { ContentType, SiteInfo } from '../types';
 import { createPool } from '../util/pool';
+import { isAbortError } from '../util/abort';
 import {
   buildTreeOrder,
   compareSiblings,
+  failureReason,
   qs,
   toContentType,
   toPosition,
   webUiUrl,
   type ConfluenceClient,
   type ContentSummary,
+  type DescendantsOptions,
   type PageBody,
   type SpaceSummary,
+  type TitleLookup,
 } from './client';
 import { collectAll, getJson, HttpError, type HttpOptions } from './http';
 import { contentUrl } from './url';
@@ -110,9 +114,23 @@ export function pickByTitle<T extends { title?: string; status?: string }>(items
   return loose.find((i) => !i.status || i.status === 'current') ?? loose[0] ?? null;
 }
 
+/** v1 `/content` query for an exact-title lookup (pages, or blog posts with their posting day). */
+export function titleQuery(spaceKey: string, title: string, lookup?: TitleLookup): string {
+  const type = lookup?.type === 'blogpost' ? 'blogpost' : 'page';
+  return `/content${qs({
+    spaceKey,
+    title,
+    type,
+    postingDay: type === 'blogpost' ? lookup?.postingDay : undefined,
+    expand: 'space,ancestors',
+    limit: 10,
+  })}`;
+}
+
 /** Concurrent requests used while walking a tree. */
 const TREE_CONCURRENCY = 4;
-const CHILD_EXPAND = 'extensions.position,childTypes.page';
+/** `space` gives every child its space key, so listing children needs no extra lookup. */
+const CHILD_EXPAND = 'extensions.position,childTypes.page,space';
 
 export class ServerClient implements ConfluenceClient {
   readonly site: SiteInfo;
@@ -138,39 +156,65 @@ export class ServerClient implements ConfluenceClient {
   getContent(id: string, type?: ContentType): Promise<ContentSummary> {
     let p = this.contents.get(id);
     if (!p) {
-      p = this.get<V1Content>(`/content/${encodeURIComponent(id)}${qs({ expand: 'space,ancestors' })}`).then((raw) =>
-        v1Summary(raw, this.site, type ? { type } : undefined),
-      );
+      p = this.get<V1Content>(`/content/${encodeURIComponent(id)}${qs({ expand: 'space,ancestors' })}`).then((raw) => {
+        this.seedAncestors(raw);
+        return v1Summary(raw, this.site, type ? { type } : undefined);
+      });
       this.contents.set(id, p);
       p.catch(() => this.contents.delete(id));
     }
     return p;
   }
 
+  private seed(c: ContentSummary): void {
+    if (!this.contents.has(c.id)) this.contents.set(c.id, Promise.resolve(c));
+  }
+
+  /**
+   * v1 returns the whole ancestor chain with every content: remember it, so walking up the tree
+   * (selection ordering, breadcrumbs) costs no further requests.
+   */
+  private seedAncestors(raw: V1Content): void {
+    const ancestors = raw.ancestors ?? [];
+    const spaceKey = raw.space?.key;
+    const spaceId = raw.space?.id !== undefined ? String(raw.space.id) : undefined;
+    ancestors.forEach((a, i) => {
+      const prev = ancestors[i - 1];
+      const id = String(a.id);
+      const type = toContentType(a.type) ?? 'page';
+      this.seed({
+        id,
+        type,
+        title: a.title ?? id,
+        spaceKey,
+        spaceId,
+        parentId: prev ? String(prev.id) : undefined,
+        parentType: prev ? (toContentType(prev.type) ?? 'page') : undefined,
+        url: contentUrl(this.site, { id, type, spaceKey }),
+      });
+    });
+  }
+
   async getChildren(parent: { id: string; type: ContentType }): Promise<ContentSummary[]> {
     // Only pages have child pages on DC/Server (no folders, whiteboards, ...).
     if (parent.type !== 'page') return [];
-    const [items, parentInfo] = await Promise.all([
-      this.list<V1Content>(
-        `/content/${encodeURIComponent(parent.id)}/child/page${qs({ expand: CHILD_EXPAND, limit: 200 })}`,
-      ),
-      this.getContent(parent.id, parent.type).catch(() => null),
-    ]);
-    return items
-      .map((raw) =>
-        v1Summary(raw, this.site, {
-          spaceKey: parentInfo?.spaceKey,
-          spaceId: parentInfo?.spaceId,
-          parentId: parent.id,
-          parentType: 'page',
-        }),
-      )
+    const items = await this.list<V1Content>(
+      `/content/${encodeURIComponent(parent.id)}/child/page${qs({ expand: CHILD_EXPAND, limit: 200 })}`,
+    );
+    const children = items
+      .map((raw) => v1Summary(raw, this.site, { parentId: parent.id, parentType: 'page' }))
       .map((s) => ({ ...s, parentId: parent.id, parentType: 'page' as const }))
       .sort(compareSiblings);
+    for (const c of children) this.seed(c);
+    return children;
   }
 
-  async getDescendants(parent: { id: string; type: ContentType }, maxDepth?: number): Promise<ContentSummary[]> {
-    return descendantsByChildren(this, parent, maxDepth);
+  async getDescendants(
+    parent: { id: string; type: ContentType; title?: string },
+    maxDepth?: number,
+    opts?: DescendantsOptions,
+  ): Promise<ContentSummary[]> {
+    return descendantsByChildren(this, parent, maxDepth, opts);
   }
 
   getSpace(spaceKey: string): Promise<SpaceSummary> {
@@ -200,6 +244,7 @@ export class ServerClient implements ConfluenceClient {
   }
 
   async getPageBody(id: string, type: ContentType): Promise<PageBody> {
+    // v1 returns breadcrumb, author and space with the body in one request.
     assertHasBody(type);
     const raw = await this.get<V1Content>(
       `/content/${encodeURIComponent(id)}${qs({ expand: 'body.export_view,version,space,ancestors,history' })}`,
@@ -213,12 +258,10 @@ export class ServerClient implements ConfluenceClient {
     return raw.body?.storage?.value ?? '';
   }
 
-  async findPageByTitle(spaceKey: string, title: string): Promise<ContentSummary | null> {
-    const res = await this.get<{ results?: V1Content[] }>(
-      `/content${qs({ spaceKey, title, type: 'page', expand: 'space,ancestors', limit: 10 })}`,
-    );
+  async findPageByTitle(spaceKey: string, title: string, lookup?: TitleLookup): Promise<ContentSummary | null> {
+    const res = await this.get<{ results?: V1Content[] }>(titleQuery(spaceKey, title, lookup));
     const hit = pickByTitle(res.results ?? [], title);
-    return hit ? v1Summary(hit, this.site) : null;
+    return hit ? v1Summary(hit, this.site, { type: lookup?.type ?? 'page' }) : null;
   }
 
   async getCurrentUser(): Promise<{ displayName: string } | null> {
@@ -245,30 +288,46 @@ export function sortRoots(roots: ContentSummary[], homepageId?: string): Content
   });
 }
 
+/** Warning for a branch that could not be listed (see DescendantsOptions.onWarning). */
+export function branchWarning(title: string | undefined, e: unknown): string {
+  const where = title ? `under “${title}”` : 'in one branch';
+  return `Could not list the pages ${where} (${failureReason(e)}); that branch was skipped.`;
+}
+
 /**
  * Tree walk via repeated `getChildren` calls (level by level, bounded concurrency), returned in
  * tree order. Used by DC/Server and as the Cloud fallback when the descendants API is unavailable.
+ * A failing listing below the root skips that branch (reported through `opts.onWarning`).
  */
 export async function descendantsByChildren(
   client: Pick<ConfluenceClient, 'getChildren'>,
-  parent: { id: string; type: ContentType },
+  parent: { id: string; type: ContentType; title?: string },
   maxDepth?: number,
+  opts?: DescendantsOptions,
 ): Promise<ContentSummary[]> {
   const limit = maxDepth === undefined ? Infinity : maxDepth;
   if (limit < 1) return [];
   const pool = createPool(TREE_CONCURRENCY);
   const all: ContentSummary[] = [];
   const seen = new Set<string>([parent.id]);
-  let level: { id: string; type: ContentType }[] = [parent];
+  let level: { id: string; type: ContentType; title?: string }[] = [parent];
   for (let depth = 1; depth <= limit && level.length > 0; depth++) {
-    const results = await Promise.all(level.map((node) => pool(() => client.getChildren(node))));
-    const next: { id: string; type: ContentType }[] = [];
+    const results = await Promise.all(
+      level.map((node) =>
+        pool(() => client.getChildren(node)).catch((e: unknown): ContentSummary[] => {
+          if (isAbortError(e) || node.id === parent.id) throw e;
+          opts?.onWarning?.(branchWarning(node.title, e));
+          return [];
+        }),
+      ),
+    );
+    const next: { id: string; type: ContentType; title?: string }[] = [];
     results.forEach((children, i) => {
       for (const c of children) {
         if (seen.has(c.id)) continue;
         seen.add(c.id);
         all.push({ ...c, parentId: level[i]!.id });
-        if (c.hasChildren !== false) next.push({ id: c.id, type: c.type });
+        if (c.hasChildren !== false) next.push({ id: c.id, type: c.type, title: c.title });
       }
     });
     level = next;

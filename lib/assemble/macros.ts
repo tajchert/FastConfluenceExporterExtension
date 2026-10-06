@@ -98,6 +98,18 @@ const MACRO_LABELS: Record<string, string> = {
   embed: 'Embedded content',
 };
 
+/**
+ * Macros that Confluence fills in the browser: export_view only has an empty shell (hidden
+ * inputs with the macro's settings, an empty list). They are on the benign list because they
+ * are usually rendered, but an empty shell gets a placeholder (FR-9: never dropped silently).
+ */
+const JS_SHELL_MACROS = new Set(['pagetree']);
+
+/** Shell parts that carry no visible content (the macro's settings). */
+const SHELL_NOISE = 'fieldset, input, script, noscript, template, style';
+/** Visible content other than text; empty lists (`ul`, `ol`) do not count. */
+const SHELL_MEDIA = 'img, svg, table, canvas, video, audio, iframe, object, embed, picture, hr, pre';
+
 /** Elements that count as visible content inside a macro container. */
 const CONTENT_SELECTOR =
   'img, svg, table, canvas, video, audio, iframe, object, embed, picture, hr, input, pre, ul, ol';
@@ -151,6 +163,13 @@ function textOf(el: Element): string {
 
 function isEmptyMacro(el: Element): boolean {
   return textOf(el) === '' && !el.querySelector(CONTENT_SELECTOR);
+}
+
+/** A client-rendered macro shell: no text and no media once its settings inputs are ignored. */
+function isEmptyShell(el: Element): boolean {
+  const clone = el.cloneNode(true) as Element;
+  clone.querySelectorAll(SHELL_NOISE).forEach((n) => n.remove());
+  return textOf(clone) === '' && !clone.querySelector(SHELL_MEDIA);
 }
 
 function macroNameOf(el: Element): string {
@@ -419,6 +438,16 @@ export function replaceUnsupportedContent(root: Element, ctx: { pageUrl: string 
   for (const el of Array.from(root.querySelectorAll('[data-macro-name], .conf-macro.output-block'))) {
     if (!root.contains(el)) continue;
     const name = macroNameOf(el);
+    if (JS_SHELL_MACROS.has(name)) {
+      if (isEmptyShell(el)) {
+        replace(el, {
+          kind: name,
+          label: 'Page tree',
+          text: 'The page tree is built by Confluence in the browser and is not included in the PDF.',
+        });
+      }
+      continue;
+    }
     if (BENIGN_EMPTY_MACROS.has(name)) continue;
     if (el.classList.contains('confluence-anchor-link')) continue;
     if (!isEmptyMacro(el)) continue;

@@ -22,14 +22,20 @@ export interface HttpOptions {
   onThrottle?: (retryInMs: number) => void;
   /** Retries for 429/502/503/504 (default 3). */
   maxRetries?: number;
+  /** Per attempt: time allowed until the response headers arrive (default 60 s). */
+  timeoutMs?: number;
+  /** Per attempt: time allowed to read the response body (default 180 s; export_view can be large). */
+  bodyTimeoutMs?: number;
 }
 
 const RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const THROTTLE_STATUSES = new Set([429, 503]);
 const BASE_DELAY_MS = 1000;
 const MAX_DELAY_MS = 120_000;
-/** Network failures (connection reset, DNS) are retried at most this many times. */
+/** Network failures (connection reset, DNS, timeouts) are retried at most this many times. */
 const NETWORK_RETRIES = 1;
+const REQUEST_TIMEOUT_MS = 60_000;
+const BODY_TIMEOUT_MS = 180_000;
 
 /** Parses `Retry-After` (delta seconds or HTTP date) into milliseconds; null if absent/invalid. */
 export function parseRetryAfter(value: string | null, now = Date.now()): number | null {
@@ -47,24 +53,19 @@ function backoffDelay(attempt: number, retryAfterMs: number | null): number {
   return Math.min(MAX_DELAY_MS, Math.round(base + jitter));
 }
 
-async function describeError(res: Response): Promise<string> {
+function describeError(res: Response, body: string): string {
   let detail = '';
   try {
-    const text = (await res.text()).slice(0, 4000);
-    try {
-      const j = JSON.parse(text) as {
-        message?: unknown;
-        errors?: { title?: unknown; detail?: unknown }[];
-        errorMessage?: unknown;
-      };
-      const first = Array.isArray(j.errors) ? j.errors[0] : undefined;
-      const m = j.message ?? first?.title ?? first?.detail ?? j.errorMessage;
-      if (typeof m === 'string') detail = m;
-    } catch {
-      /* not JSON: ignore the HTML error page */
-    }
+    const j = JSON.parse(body.slice(0, 4000)) as {
+      message?: unknown;
+      errors?: { title?: unknown; detail?: unknown }[];
+      errorMessage?: unknown;
+    };
+    const first = Array.isArray(j.errors) ? j.errors[0] : undefined;
+    const m = j.message ?? first?.title ?? first?.detail ?? j.errorMessage;
+    if (typeof m === 'string') detail = m;
   } catch {
-    /* body unreadable */
+    /* not JSON: ignore the HTML error page */
   }
   const head = `HTTP ${res.status}${res.statusText ? ' ' + res.statusText : ''}`;
   const hint =
@@ -76,56 +77,83 @@ async function describeError(res: Response): Promise<string> {
   return detail ? `${head}${hint}: ${detail.slice(0, 300)}` : `${head}${hint}`;
 }
 
-async function request(url: string, accept: string, opts: HttpOptions = {}): Promise<Response> {
+type Attempt = { kind: 'response'; res: Response; text: string } | { kind: 'failed'; reason: string };
+
+/** One fetch with its own timeouts (headers, then body) on top of the caller's signal. */
+async function attemptOnce(url: string, accept: string, signal: AbortSignal | undefined, headerTimeout: number, bodyTimeout: number): Promise<Attempt> {
+  const ctl = new AbortController();
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = (ms: number) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      ctl.abort();
+    }, ms);
+  };
+  const onAbort = () => ctl.abort();
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try {
+    arm(headerTimeout);
+    const res = await fetch(url, {
+      method: 'GET',
+      credentials: 'include',
+      headers: { Accept: accept },
+      redirect: 'follow',
+      cache: 'no-store',
+      signal: ctl.signal,
+    });
+    arm(bodyTimeout);
+    const text = await res.text();
+    return { kind: 'response', res, text };
+  } catch (e) {
+    if (signal?.aborted || (!timedOut && isAbortError(e))) throw abortError();
+    return {
+      kind: 'failed',
+      reason: timedOut ? 'Confluence did not answer in time (request timed out)' : `Network error: ${(e as Error)?.message ?? String(e)}`,
+    };
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
+/**
+ * GET with retries. Every attempt has its own timeout, so a connection that is accepted but never
+ * answered cannot hang an export: a timeout is retried like a network failure and finally
+ * reported as HttpError(0).
+ */
+async function request(url: string, accept: string, opts: HttpOptions = {}): Promise<{ res: Response; text: string }> {
   const { signal, onThrottle } = opts;
   const maxRetries = Math.max(0, opts.maxRetries ?? 3);
+  const headerTimeout = Math.max(1, opts.timeoutMs ?? REQUEST_TIMEOUT_MS);
+  const bodyTimeout = Math.max(1, opts.bodyTimeoutMs ?? BODY_TIMEOUT_MS);
   let networkFailures = 0;
   for (let attempt = 0; ; attempt++) {
     throwIfAborted(signal);
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'GET',
-        credentials: 'include',
-        headers: { Accept: accept },
-        redirect: 'follow',
-        cache: 'no-store',
-        signal,
-      });
-    } catch (e) {
-      if (signal?.aborted || isAbortError(e)) throw abortError();
+    const r = await attemptOnce(url, accept, signal, headerTimeout, bodyTimeout);
+    if (r.kind === 'failed') {
       if (networkFailures < NETWORK_RETRIES && attempt < maxRetries) {
         networkFailures++;
         await sleep(backoffDelay(attempt, null), signal);
         continue;
       }
-      throw new HttpError(0, url, `Network error: ${(e as Error)?.message ?? String(e)}`);
+      throw new HttpError(0, url, r.reason);
     }
-    if (res.ok) return res;
+    const { res, text } = r;
+    if (res.ok) return { res, text };
     if (RETRY_STATUSES.has(res.status) && attempt < maxRetries) {
       const wait = backoffDelay(attempt, parseRetryAfter(res.headers.get('Retry-After')));
       if (THROTTLE_STATUSES.has(res.status)) onThrottle?.(wait);
-      try {
-        await res.body?.cancel();
-      } catch {
-        /* ignore */
-      }
       await sleep(wait, signal);
       continue;
     }
-    throw new HttpError(res.status, url, await describeError(res));
+    throw new HttpError(res.status, url, describeError(res, text));
   }
 }
 
 export async function getJson<T>(url: string, opts?: HttpOptions): Promise<T> {
-  const res = await request(url, 'application/json', opts);
-  let text: string;
-  try {
-    text = await res.text();
-  } catch (e) {
-    if (opts?.signal?.aborted || isAbortError(e)) throw abortError();
-    throw new HttpError(0, url, `Network error while reading the response: ${(e as Error)?.message ?? e}`);
-  }
+  const { res, text } = await request(url, 'application/json', opts);
   try {
     return JSON.parse(text) as T;
   } catch {
@@ -139,13 +167,7 @@ export async function getJson<T>(url: string, opts?: HttpOptions): Promise<T> {
 }
 
 export async function getText(url: string, opts?: HttpOptions): Promise<string> {
-  const res = await request(url, 'text/html, application/xhtml+xml, */*;q=0.8', opts);
-  try {
-    return await res.text();
-  } catch (e) {
-    if (opts?.signal?.aborted || isAbortError(e)) throw abortError();
-    throw new HttpError(0, url, `Network error while reading the response: ${(e as Error)?.message ?? e}`);
-  }
+  return (await request(url, 'text/html, application/xhtml+xml, */*;q=0.8', opts)).text;
 }
 
 interface PagedResponse<T> {

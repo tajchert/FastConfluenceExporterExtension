@@ -139,6 +139,7 @@ describe('parseConfluenceUrl — Data Center / Server', () => {
       kind: 'blogpost',
       spaceKey: 'ENG',
       title: 'Kickoff Notes',
+      postingDay: '2024-01-05',
     });
   });
   it('handles a context path', () => {

@@ -1,8 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { SwToWorker, WorkerToSw } from '../../lib/messages';
-import type { FinalizeOptions } from '../../lib/pdf/merge';
+import type { ExportFinalizeOptions, FinalizeOptions } from '../../lib/pdf/merge';
 import type { PrintParams } from '../../lib/render/cdp';
-import { applyPolicyToPages, runJob, shiftStartPage, type RunnerDeps } from '../../lib/job/runner';
+import {
+  UNVERIFIED_SPACE_MESSAGE,
+  applyPolicyToPages,
+  currentPageRef,
+  destinationPageId,
+  runJob,
+  type RunnerDeps,
+} from '../../lib/job/runner';
 import {
   DEFAULT_OPTIONS,
   DEFAULT_SETTINGS,
@@ -66,8 +73,11 @@ interface Harness {
   calls: SwToWorker[];
   statuses: JobStatus[];
   prints: PrintParams[];
-  saved: { bytes: Uint8Array; filename: string; mime: string }[];
-  finalizeCalls: { base: Uint8Array; o: FinalizeOptions }[];
+  sessions: number;
+  zipped: string[][];
+  saved: { bytes: Uint8Array; filename: string; mime: string; signal?: AbortSignal }[];
+  finalizeCalls: { base: Uint8Array; o: ExportFinalizeOptions }[];
+  pageFinalizeCalls: { base: Uint8Array; o: FinalizeOptions }[];
   closed: (number | undefined)[];
   controller: AbortController;
   emit: (msg: WorkerToSw) => void;
@@ -78,51 +88,74 @@ function harness(opts: {
   collected?: PageRef[];
   policy?: ManagedPolicy;
   batchSize?: number;
-  print?: (tabId: number, params: PrintParams) => Promise<Uint8Array>;
+  print?: (params: PrintParams) => Promise<Uint8Array>;
   live?: Map<string, Uint8Array | Error>;
-  starts?: Map<string, number>;
-  chromeOutline?: { title: string; pageIndex: number; children: never[] }[];
+  unplacedLive?: string[];
   onAssemble?: (msg: Extract<SwToWorker, { type: 'worker/assemble' }>) => void;
+  /** Answer for a background worker operation: default = success. */
+  workerOp?: (msg: Extract<SwToWorker, { type: 'worker/collect' | 'worker/fetch' }>) => Partial<Extract<WorkerToSw, { type: 'worker/done' }>> | null;
 } = {}): Harness {
   const calls: SwToWorker[] = [];
   const statuses: JobStatus[] = [];
   const prints: PrintParams[] = [];
   const saved: Harness['saved'] = [];
   const finalizeCalls: Harness['finalizeCalls'] = [];
+  const pageFinalizeCalls: Harness['pageFinalizeCalls'] = [];
   const closed: (number | undefined)[] = [];
-  const listeners = new Set<(m: WorkerToSw) => void>();
+  const listeners = new Map<string, Set<(m: WorkerToSw) => void>>();
   const controller = new AbortController();
   let printCount = 0;
+  const zipped: string[][] = [];
+  const h = { sessions: 0, zipped } as Harness;
+  const emit = (m: WorkerToSw) => {
+    if (m.type === 'worker/ready') return;
+    for (const l of [...(listeners.get(m.jobId) ?? [])]) l(m);
+  };
 
   const deps: RunnerDeps = {
     callWorker: (async (_tabId: number, msg: SwToWorker) => {
       calls.push(msg);
       switch (msg.type) {
         case 'worker/collect':
-          return { pages: opts.collected ?? [], warnings: ['Depth limited'] };
         case 'worker/fetch': {
-          const results = msg.pages.map((p) => ({
-            id: p.id,
-            ok: true,
-            needsLiveRender: false,
-            spaceKey: p.spaceKey,
-            ...(opts.infos?.[p.id] ?? {}),
-          }));
-          msg.pages.forEach((p, i) => listeners.forEach((l) => l({ type: 'worker/progress', jobId: msg.jobId, done: i + 1, total: msg.pages.length, current: p.title })));
-          return { results };
+          const op = msg.type === 'worker/collect' ? 'collect' : 'fetch';
+          let result: unknown;
+          if (msg.type === 'worker/collect') {
+            result = { pages: opts.collected ?? [], warnings: ['Depth limited'] };
+          } else {
+            const results = msg.pages.map((p) => ({
+              id: p.id,
+              ok: true,
+              needsLiveRender: false,
+              spaceKey: p.spaceKey,
+              title: p.title || `Fetched ${p.id}`,
+              ...(opts.infos?.[p.id] ?? {}),
+            }));
+            msg.pages.forEach((p, i) => emit({ type: 'worker/progress', jobId: msg.jobId, done: i + 1, total: msg.pages.length, current: p.title }));
+            result = { results };
+          }
+          const custom = opts.workerOp?.(msg);
+          if (custom !== null) {
+            queueMicrotask(() => emit({ type: 'worker/done', jobId: msg.jobId, op, result, ...(custom ?? {}) }));
+          }
+          return { started: true };
         }
         case 'worker/assemble':
           opts.onAssemble?.(msg);
           return { imageFailures: 1, pageIds: msg.pageIds };
         case 'worker/space':
           return { key: msg.spaceKey, name: 'Engineering' };
+        case 'worker/ping':
+          return { ready: true };
         default:
           return undefined;
       }
     }) as RunnerDeps['callWorker'],
-    subscribeWorker: (_jobId, l) => {
-      listeners.add(l);
-      return () => listeners.delete(l);
+    subscribeWorker: (jobId, l) => {
+      let set = listeners.get(jobId);
+      if (!set) listeners.set(jobId, (set = new Set()));
+      set.add(l);
+      return () => set!.delete(l);
     },
     openWorkerTab: vi.fn(async () => WORKER_TAB),
     closeTabQuietly: async (id) => {
@@ -142,34 +175,40 @@ function harness(opts: {
       outline: true,
       tagged: true,
     }),
-    printTabToPdf: async (tabId, params) => {
-      prints.push(params);
-      if (opts.print) return opts.print(tabId, params);
-      return pdf(`print${++printCount}`);
-    },
+    printSession: vi.fn(() => {
+      h.sessions++;
+      return {
+        print: async (params: PrintParams) => {
+          prints.push(params);
+          if (opts.print) return opts.print(params);
+          return pdf(`print${++printCount}`);
+        },
+        close: vi.fn(async () => undefined),
+      };
+    }),
     isDebuggerUnavailable: (e) => (e as Error)?.name === 'DebuggerUnavailableError',
     detachAll: vi.fn(async () => undefined),
     fallbackPrint: vi.fn(async () => undefined),
     liveRenderPages: vi.fn(async () => opts.live ?? new Map()),
     concatPdfs: vi.fn(async (parts: Uint8Array[]) => ({ bytes: pdf('concat'), offsets: parts.map((_, i) => i * 10) })),
-    findSectionStartPages: vi.fn(async (_pdf: Uint8Array, pages: { id: string }[]) => {
-      if (opts.starts) return opts.starts;
-      return new Map(pages.map((p, i) => [p.id, 2 + i * 2]));
+    finalizeExport: vi.fn(async (base: Uint8Array, o: ExportFinalizeOptions) => {
+      // The runner releases the live PDFs right after: keep a copy.
+      finalizeCalls.push({ base, o: { ...o, live: o.live ? new Map(o.live) : undefined } });
+      return { bytes: pdf('final'), pageCount: 9, unplacedLive: opts.unplacedLive ?? [] };
     }),
     finalizePdf: vi.fn(async (base: Uint8Array, o: FinalizeOptions) => {
-      finalizeCalls.push({ base, o });
-      return { bytes: pdf('final'), pageCount: 9 };
+      pageFinalizeCalls.push({ base, o });
+      return { bytes: pdf('page'), pageCount: 1 };
     }),
-    buildOutline: vi.fn((pages: PageRef[], start: Map<string, number>) =>
-      pages.map((p) => ({ title: p.title, pageIndex: start.get(p.id)!, children: [] })),
-    ),
-    readOutline: vi.fn(async () => opts.chromeOutline ?? []),
-    countPdfPages: vi.fn(async () => 3),
-    zipFiles: vi.fn((files: { name: string; data: Uint8Array }[]) => new Uint8Array(files.length * 100)),
-    saveBytes: async (bytes, filename, mime) => {
-      saved.push({ bytes, filename, mime });
+    zipFiles: vi.fn(async (files: { name: string; data: Uint8Array }[]) => {
+      zipped.push(files.map((f) => f.name));
+      return new Uint8Array(files.length * 100);
+    }),
+    saveBytes: async (bytes, filename, mime, signal) => {
+      saved.push({ bytes, filename, mime, signal });
       return 77;
     },
+    saveCheckpoint: vi.fn(),
     settings: { ...DEFAULT_SETTINGS, printBatchSize: opts.batchSize ?? 150 },
     policy: opts.policy ?? {},
     version: '1.2.3',
@@ -178,24 +217,27 @@ function harness(opts: {
     onUpdate: (job) => {
       if (statuses[statuses.length - 1] !== job.status) statuses.push(job.status);
     },
+    workerPingMs: 5,
   };
-  return {
+  return Object.assign(h, {
     deps,
     calls,
     statuses,
     prints,
     saved,
     finalizeCalls,
+    pageFinalizeCalls,
     closed,
     controller,
-    emit: (m) => listeners.forEach((l) => l(m)),
-  };
+    emit,
+  });
 }
 
 const assembles = (h: Harness) => h.calls.filter((c): c is Extract<SwToWorker, { type: 'worker/assemble' }> => c.type === 'worker/assemble');
+const fetchCall = (h: Harness) => h.calls.find((c) => c.type === 'worker/fetch') as Extract<SwToWorker, { type: 'worker/fetch' }>;
 
 describe('runJob: combined PDF', () => {
-  it('runs the happy path and keeps Chrome’s outline for a single batch', async () => {
+  it('runs the happy path: one batch, cover unnumbered, page-tree bookmarks built from all pages', async () => {
     const h = harness();
     const job = makeJob([ref('1'), ref('2', 1), ref('3', 1)]);
     await runJob(job, h.deps);
@@ -209,12 +251,14 @@ describe('runJob: combined PDF', () => {
     expect(asm[0].cover?.title).toBe('Root Title');
     expect(asm[0].cover?.pageCount).toBe(3);
     expect(asm[0].toc).toBe(true);
-    expect(h.prints[0].displayHeaderFooter).toBe(true);
+    // With a cover, Chrome's footer (which cannot skip the cover) is off and numbers are stamped.
+    expect(h.prints[0].displayHeaderFooter).toBe(false);
 
     const fin = h.finalizeCalls[0].o;
-    expect(fin.outline).toBeUndefined();
-    expect(fin.inserts).toBeUndefined();
-    expect(fin.stampPageNumbers).toBeUndefined();
+    expect(fin.pages.map((p) => p.id)).toEqual(['1', '2', '3']);
+    expect(fin.excludeIds).toEqual([]);
+    expect(fin.live).toBeUndefined();
+    expect(fin.stampPageNumbers).toEqual({ skipFirst: 1 });
     expect(fin.metadata).toMatchObject({
       title: 'Root Title',
       author: 'Jane Doe',
@@ -224,29 +268,58 @@ describe('runJob: combined PDF', () => {
 
     expect(h.saved[0].filename).toBe('ENG_Root Title_2026-10-06.pdf');
     expect(h.saved[0].mime).toBe('application/pdf');
+    expect(h.saved[0].signal).toBe(h.controller.signal);
     expect(job.result).toMatchObject({ filename: 'ENG_Root Title_2026-10-06.pdf', downloadId: 77, pageCount: 3, sheetCount: 9 });
     expect(job.errors.map((e) => e.severity)).toEqual(['degraded']); // 1 image placeholder
     expect(h.closed).toEqual([WORKER_TAB]);
     expect(h.calls.some((c) => c.type === 'worker/dispose')).toBe(true);
+    expect(h.deps.saveCheckpoint).toHaveBeenCalledTimes(1);
+    expect(job.pageCount).toBe(3);
   });
 
-  it('collects when no pages are given and records warnings', async () => {
-    const h = harness({ collected: [ref('1'), ref('2', 1)] });
+  it('keeps Chrome’s footer when there is no cover and a single batch', async () => {
+    const h = harness();
+    const job = makeJob([ref('1'), ref('2', 1)], { includeCover: false });
+    await runJob(job, h.deps);
+    expect(h.prints[0].displayHeaderFooter).toBe(true);
+    expect(h.finalizeCalls[0].o.stampPageNumbers).toBeUndefined();
+  });
+
+  it('collects in the background when no pages are given and records warnings', async () => {
+    const h = harness({ collected: [ref('1'), ref('2', 1)], policy: { maxPages: 50 } });
     const job = makeJob([], {}, 'subtree');
     await runJob(job, h.deps);
     expect(job.status).toBe('done');
-    expect(h.calls[0].type).toBe('worker/collect');
+    const collect = h.calls[0] as Extract<SwToWorker, { type: 'worker/collect' }>;
+    expect(collect.type).toBe('worker/collect');
+    expect(collect.maxItems).toBe(51);
     expect(job.pages.map((p) => p.id)).toEqual(['1', '2']);
     expect(job.warnings).toEqual(['Depth limited']);
   });
 
-  it('skips pages that fail to load and finishes', async () => {
+  it('"This page" needs no collection; the title comes from the fetch', async () => {
+    const h = harness();
+    const job = makeJob([], {}, 'current');
+    job.request.root = { id: '9', type: 'page', spaceKey: 'ENG' };
+    await runJob(job, h.deps);
+    expect(job.status).toBe('done');
+    expect(h.calls.some((c) => c.type === 'worker/collect')).toBe(false);
+    expect(fetchCall(h).pages).toEqual([
+      expect.objectContaining({ id: '9', reason: 'root', depth: 0, url: `${SITE.baseUrl}/spaces/ENG/pages/9` }),
+    ]);
+    expect(job.pages[0].title).toBe('Fetched 9');
+    expect(h.saved[0].filename).toBe('ENG_Fetched 9_2026-10-06.pdf');
+  });
+
+  it('skips pages that fail to load; they stay in the page list as excluded', async () => {
     const h = harness({ infos: { '2': { ok: false, httpStatus: 403 } } });
     const job = makeJob([ref('1'), ref('2', 1)]);
     await runJob(job, h.deps);
     expect(job.status).toBe('done');
     expect(assembles(h)[0].pageIds).toEqual(['1']);
-    expect(assembles(h)[0].allPages.map((p) => p.id)).toEqual(['1']);
+    expect(assembles(h)[0].allPages.map((p) => p.id)).toEqual(['1', '2']);
+    expect(assembles(h)[0].excludeIds).toEqual(['2']);
+    expect(h.finalizeCalls[0].o.excludeIds).toEqual(['2']);
     const skipped = job.errors.filter((e) => e.severity === 'skipped');
     expect(skipped).toEqual([
       { pageId: '2', title: 'Page 2', message: 'You do not have permission to view this page.', severity: 'skipped' },
@@ -264,6 +337,15 @@ describe('runJob: combined PDF', () => {
     expect(h.closed).toEqual([WORKER_TAB]);
   });
 
+  it('fails clearly for a folder without pages', async () => {
+    const h = harness();
+    const job = makeJob([ref('f', 0, { type: 'folder', title: 'Empty' }), ref('g', 1, { type: 'folder', title: 'Sub' })], {}, 'folder');
+    await runJob(job, h.deps);
+    expect(job.status).toBe('error');
+    expect(job.message).toBe('This folder has no pages you can export.');
+    expect(h.saved).toHaveLength(0);
+  });
+
   it('enforces blocked spaces and maxPages', async () => {
     const policy: ManagedPolicy = { blockedSpaceKeys: ['hr'] };
     const h = harness({ policy });
@@ -271,8 +353,7 @@ describe('runJob: combined PDF', () => {
     await runJob(job, h.deps);
     expect(job.status).toBe('done');
     expect(job.errors.find((e) => e.pageId === '2')?.message).toBe('Blocked by your administrator');
-    const fetch = h.calls.find((c) => c.type === 'worker/fetch') as Extract<SwToWorker, { type: 'worker/fetch' }>;
-    expect(fetch.pages.map((p) => p.id)).toEqual(['1']);
+    expect(fetchCall(h).pages.map((p) => p.id)).toEqual(['1']);
 
     const h2 = harness({ policy: { maxPages: 1 } });
     const job2 = makeJob([ref('1'), ref('2', 1)]);
@@ -283,13 +364,23 @@ describe('runJob: combined PDF', () => {
 
   it('drops pages whose fetched space key is blocked', async () => {
     const h = harness({ policy: { blockedSpaceKeys: ['SECRET'] }, infos: { '2': { spaceKey: 'SECRET' } } });
+    const job = makeJob([ref('1'), ref('2', 1, { spaceKey: 'OPS', reason: 'linked' })]);
+    await runJob(job, h.deps);
+    expect(job.status).toBe('done');
+    expect(assembles(h)[0].pageIds).toEqual(['1']);
+    expect(job.errors.find((e) => e.pageId === '2')?.message).toBe('Blocked by your administrator');
+  });
+
+  it('fails closed for a linked page whose space is unknown when spaces are blocked', async () => {
+    const h = harness({ policy: { blockedSpaceKeys: ['SECRET'] } });
     const job = makeJob([ref('1'), ref('2', 1, { spaceKey: undefined, reason: 'linked' })]);
     await runJob(job, h.deps);
     expect(job.status).toBe('done');
     expect(assembles(h)[0].pageIds).toEqual(['1']);
+    expect(job.errors.find((e) => e.pageId === '2')?.message).toBe(UNVERIFIED_SPACE_MESSAGE);
   });
 
-  it('prints in batches: cover and TOC in the first batch only, outline rebuilt, numbers stamped', async () => {
+  it('prints in batches: cover and TOC in the first only, destinations owned by the real section, numbers stamped', async () => {
     const h = harness({ batchSize: 2 });
     const pages = [ref('1'), ref('2', 1), ref('3', 1), ref('4', 2), ref('5', 1)];
     const job = makeJob(pages);
@@ -300,66 +391,49 @@ describe('runJob: combined PDF', () => {
     expect(asm.map((a) => a.cover !== null)).toEqual([true, false, false]);
     expect(asm.map((a) => a.toc)).toEqual([true, false, false]);
     expect(asm.every((a) => a.allPages.length === 5)).toBe(true);
-    expect(h.deps.concatPdfs).toHaveBeenCalledTimes(1);
+    // One debugger session for all batches.
+    expect(h.sessions).toBe(1);
     expect(h.prints.every((p) => p.displayHeaderFooter === false)).toBe(true);
-    const fin = h.finalizeCalls[0].o;
+    const concat = h.deps.concatPdfs as ReturnType<typeof vi.fn>;
+    expect(concat).toHaveBeenCalledTimes(1);
+    const owner = concat.mock.calls[0][1] as (name: string) => number | undefined;
+    expect(owner('p-3')).toBe(1);
+    expect(owner('p5-Some-heading')).toBe(2);
+    expect(owner('p-1')).toBe(0);
+    expect(owner('elsewhere')).toBeUndefined();
     expect(h.finalizeCalls[0].base).toEqual(pdf('concat'));
-    expect(fin.outline?.map((o) => o.pageIndex)).toEqual([2, 4, 6, 8, 10]);
-    expect(fin.stampPageNumbers).toEqual({});
+    expect(h.finalizeCalls[0].o.stampPageNumbers).toEqual({ skipFirst: 1 });
   });
 
-  it('keeps Chrome’s (merged) outline after batches and inserts instead of rebuilding it', async () => {
+  it('passes live-rendered pages to the finalizer and reports one that could not be placed', async () => {
+    const live = new Map<string, Uint8Array | Error>([
+      ['2', pdf('live2')],
+      ['3', new Error('timeout')],
+      ['4', pdf('live4')],
+    ]);
     const h = harness({
-      batchSize: 2,
-      chromeOutline: [{ title: 'Page 1', pageIndex: 2, children: [] }],
-      infos: { '2': { needsLiveRender: true } },
-      live: new Map([['2', pdf('live2')]]),
+      infos: { '2': { needsLiveRender: true }, '3': { needsLiveRender: true }, '4': { needsLiveRender: true } },
+      live,
+      unplacedLive: ['4'],
     });
-    const job = makeJob([ref('1'), ref('2', 1), ref('3', 1)], { liveRender: true, marginsMm: { top: 10, right: 10, bottom: 5, left: 10 } });
+    const job = makeJob([ref('1'), ref('2', 1), ref('3', 1), ref('4', 1)], { liveRender: true, marginsMm: { top: 10, right: 10, bottom: 5, left: 10 } });
     await runJob(job, h.deps);
     expect(job.status).toBe('done');
-    const fin = h.finalizeCalls[0].o;
-    expect(fin.outline).toBeUndefined();
-    expect(fin.inserts?.length).toBe(1);
-    expect(h.deps.buildOutline).not.toHaveBeenCalled();
+
+    expect(fetchCall(h).needStorage).toBe(true);
+    expect(fetchCall(h).liveRenderMacros.length).toBeGreaterThan(0);
     // Live pages print without Chrome's footer but keep room for the stamped numbers.
     const liveOpts = (h.deps.liveRenderPages as ReturnType<typeof vi.fn>).mock.calls[0][1];
     expect(liveOpts.options.pageNumbers).toBe(false);
     expect(liveOpts.options.marginsMm.bottom).toBe(12);
-  });
-
-  it('inserts live-rendered pages after their header sheet and shifts the outline', async () => {
-    const live = new Map<string, Uint8Array | Error>([
-      ['2', pdf('live2')],
-      ['3', new Error('timeout')],
-    ]);
-    const h = harness({
-      infos: { '2': { needsLiveRender: true }, '3': { needsLiveRender: true } },
-      live,
-      starts: new Map([
-        ['1', 2],
-        ['2', 4],
-        ['3', 5],
-      ]),
-    });
-    const job = makeJob([ref('1'), ref('2', 1), ref('3', 1)], { liveRender: true });
-    await runJob(job, h.deps);
-    expect(job.status).toBe('done');
-
-    const fetch = h.calls.find((c) => c.type === 'worker/fetch') as Extract<SwToWorker, { type: 'worker/fetch' }>;
-    expect(fetch.needStorage).toBe(true);
-    expect(fetch.liveRenderMacros.length).toBeGreaterThan(0);
-    const liveOpts = (h.deps.liveRenderPages as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    expect(liveOpts.options.pageNumbers).toBe(false);
 
     // Page 3's live render failed → assembled statically.
-    expect(assembles(h)[0].liveRenderIds).toEqual(['2']);
+    expect(assembles(h)[0].liveRenderIds).toEqual(['2', '4']);
     const fin = h.finalizeCalls[0].o;
-    expect(fin.inserts).toEqual([{ afterPageIndex: 4, pdf: pdf('live2') }]);
-    // countPdfPages → 3 inserted sheets after index 4: page 3 moves from 5 to 8.
-    expect(fin.outline?.map((o) => o.pageIndex)).toEqual([2, 4, 8]);
-    expect(fin.stampPageNumbers).toEqual({});
+    expect([...(fin.live?.keys() ?? [])]).toEqual(['2', '4']);
+    expect(fin.stampPageNumbers).toEqual({ skipFirst: 1 });
     expect(job.errors.find((e) => e.pageId === '3')?.severity).toBe('degraded');
+    expect(job.errors.find((e) => e.pageId === '4')?.message).toMatch(/could not be placed/);
   });
 
   it('ignores live render when the policy disables it', async () => {
@@ -368,9 +442,8 @@ describe('runJob: combined PDF', () => {
     await runJob(job, h.deps);
     expect(job.status).toBe('done');
     expect(h.deps.liveRenderPages).not.toHaveBeenCalled();
-    const fetch = h.calls.find((c) => c.type === 'worker/fetch') as Extract<SwToWorker, { type: 'worker/fetch' }>;
-    expect(fetch.liveRenderMacros).toEqual([]);
-    expect(fetch.needStorage).toBe(false);
+    expect(fetchCall(h).liveRenderMacros).toEqual([]);
+    expect(fetchCall(h).needStorage).toBe(false);
   });
 
   it('uses the space name for space exports', async () => {
@@ -382,24 +455,47 @@ describe('runJob: combined PDF', () => {
     expect(h.finalizeCalls[0].o.metadata.subject).toBe('Confluence export: Engineering – 2 pages');
   });
 
-  it('reports fetch progress and throttling from the worker', async () => {
+  it('reports fetch progress in pages', async () => {
     const h = harness();
     const seen: string[] = [];
     const onUpdate = h.deps.onUpdate;
     h.deps.onUpdate = (job) => {
       onUpdate(job);
-      if (job.status === 'fetching') seen.push(`${job.progress.done}/${job.progress.total}${job.throttled ? ' T' : ''}`);
+      if (job.status === 'fetching') seen.push(`${job.progress.done}/${job.progress.total} ${job.progress.unit}`);
     };
     const job = makeJob([ref('1'), ref('2', 1)]);
-    const p = runJob(job, h.deps);
-    await p;
-    expect(seen).toContain('1/2');
-    expect(seen).toContain('2/2');
+    await runJob(job, h.deps);
+    expect(seen).toContain('1/2 page');
+    expect(seen).toContain('2/2 page');
+  });
+
+  it('fails with the worker’s message when the session expired mid-fetch', async () => {
+    const h = harness({
+      workerOp: (msg) => (msg.type === 'worker/fetch' ? { error: 'Your Confluence session has expired.', code: 'LOGIN_REQUIRED', result: undefined } : {}),
+    });
+    const job = makeJob([ref('1'), ref('2', 1)]);
+    await runJob(job, h.deps);
+    expect(job.status).toBe('error');
+    expect(job.message).toBe('Your Confluence session has expired.');
+    expect(h.closed).toEqual([WORKER_TAB]);
+  });
+
+  it('fails when the worker tab dies during a background operation', async () => {
+    const h = harness({ workerOp: () => null });
+    const original = h.deps.callWorker;
+    h.deps.callWorker = (async (tabId: number, msg: SwToWorker) => {
+      if (msg.type === 'worker/ping') throw new Error('No tab with id: 42');
+      return original(tabId, msg);
+    }) as RunnerDeps['callWorker'];
+    const job = makeJob([ref('1')]);
+    await runJob(job, h.deps);
+    expect(job.status).toBe('error');
+    expect(job.message).toMatch(/helper tab was closed/);
   });
 });
 
 describe('runJob: separate files', () => {
-  it('prints each page on its own and zips them', async () => {
+  it('prints each page on its own (one debugger session) and zips them', async () => {
     const h = harness();
     const job = makeJob([ref('1'), ref('2', 1), ref('f', 1, { type: 'folder', title: 'Folder' })], { separateFiles: true });
     await runJob(job, h.deps);
@@ -407,8 +503,9 @@ describe('runJob: separate files', () => {
     const asm = assembles(h);
     expect(asm.map((a) => a.pageIds)).toEqual([['1'], ['2']]);
     expect(asm.every((a) => a.cover === null && a.toc === false && a.allPages.length === 1)).toBe(true);
-    const files = (h.deps.zipFiles as ReturnType<typeof vi.fn>).mock.calls[0][0] as { name: string }[];
-    expect(files.map((f) => f.name)).toEqual(['1_Page 1.pdf', '2_Page 2.pdf']);
+    expect(h.sessions).toBe(1);
+    expect(h.prints).toHaveLength(2);
+    expect(h.zipped).toEqual([['1_Page 1.pdf', '2_Page 2.pdf']]);
     expect(h.saved[0]).toMatchObject({ filename: 'ENG_Root Title_2026-10-06.zip', mime: 'application/zip' });
   });
 
@@ -467,6 +564,39 @@ describe('runJob: debugger fallback and cancel', () => {
     expect(h.deps.openWorkerTab).not.toHaveBeenCalled();
   });
 
+  it('closes a worker tab that finishes opening after the cancel', async () => {
+    const h = harness();
+    let resolveOpen!: (id: number) => void;
+    h.deps.openWorkerTab = vi.fn(() => new Promise<number>((r) => (resolveOpen = r)));
+    const job = makeJob([ref('1')]);
+    const run = runJob(job, h.deps);
+    await Promise.resolve();
+    h.controller.abort();
+    await run;
+    expect(job.status).toBe('cancelled');
+    expect((h.deps.openWorkerTab as ReturnType<typeof vi.fn>).mock.calls[0][2]).toBe(h.controller.signal);
+    expect(h.closed).toEqual([]);
+    resolveOpen(99);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.closed).toEqual([99]);
+  });
+
+  it('cancelling while saving cancels the download', async () => {
+    const h = harness();
+    let saveSignal: AbortSignal | undefined;
+    h.deps.saveBytes = (_bytes, _name, _mime, signal) =>
+      new Promise<number>((_resolve, reject) => {
+        saveSignal = signal;
+        signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        queueMicrotask(() => h.controller.abort());
+      });
+    const job = makeJob([ref('1')]);
+    await runJob(job, h.deps);
+    expect(job.status).toBe('cancelled');
+    expect(saveSignal?.aborted).toBe(true);
+    expect(job.result).toBeUndefined();
+  });
+
   it('treats a dismissed "Save as" dialog as a cancel, not a failure', async () => {
     const h = harness();
     h.deps.saveBytes = async () => {
@@ -496,21 +626,34 @@ describe('runJob: debugger fallback and cancel', () => {
 });
 
 describe('runner helpers', () => {
-  it('applyPolicyToPages uses the root space for same-tree pages without a key', () => {
-    const pages = [ref('1', 0, { spaceKey: undefined }), ref('2', 1, { spaceKey: undefined, reason: 'linked' })];
+  it('applyPolicyToPages: same-tree pages inherit the root space; linked pages without a space fail closed', () => {
+    const pages = [ref('1', 0, { spaceKey: undefined }), ref('2', 1, { spaceKey: undefined, reason: 'linked' }), ref('3', 1, { spaceKey: 'OPS', reason: 'linked' })];
     const res = applyPolicyToPages(pages, { blockedSpaceKeys: ['ENG'] }, 'eng');
-    expect(res.pages.map((p) => p.id)).toEqual(['2']);
-    expect(res.errors.map((e) => e.pageId)).toEqual(['1']);
+    expect(res.pages.map((p) => p.id)).toEqual(['3']);
+    expect(res.errors.map((e) => [e.pageId, e.message])).toEqual([
+      ['1', 'Blocked by your administrator'],
+      ['2', UNVERIFIED_SPACE_MESSAGE],
+    ]);
+    // Without a block list nothing is dropped.
+    expect(applyPolicyToPages(pages, {}, 'eng').pages).toHaveLength(3);
   });
 
-  it('shiftStartPage accounts for inserts before the start', () => {
-    const inserts = [
-      { afterPageIndex: 1, count: 2 },
-      { afterPageIndex: 5, count: 3 },
-    ];
-    expect(shiftStartPage(0, inserts)).toBe(0);
-    expect(shiftStartPage(1, inserts)).toBe(1);
-    expect(shiftStartPage(2, inserts)).toBe(4);
-    expect(shiftStartPage(6, inserts)).toBe(11);
+  it('destinationPageId maps section and heading names to their page', () => {
+    expect(destinationPageId('p-123')).toBe('123');
+    expect(destinationPageId('p123-Intro')).toBe('123');
+    expect(destinationPageId('toc')).toBeUndefined();
+  });
+
+  it('currentPageRef builds the page from the request', () => {
+    const job = makeJob([], {}, 'current');
+    expect(currentPageRef(job.request)).toEqual({
+      id: '1',
+      type: 'page',
+      title: 'Root Title',
+      depth: 0,
+      reason: 'root',
+      spaceKey: 'ENG',
+      url: `${SITE.baseUrl}/spaces/ENG/pages/1`,
+    });
   });
 });

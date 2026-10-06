@@ -7,12 +7,12 @@
 import path from 'node:path';
 import type { Page, Request } from '@playwright/test';
 import { unzipSync } from 'fflate';
-import { PDFDict, PDFName } from 'pdf-lib';
+import { PDFArray, PDFDict, PDFName } from 'pdf-lib';
 import type { ExportJobState, ExportRequest } from '../../lib/types';
 import { encodeRequestParam } from '../../lib/util/base64';
 import { cloudSite, dcSite, expect, options, test, type ExtensionHarness } from './fixtures';
 import type { MockConfluence } from './mock-confluence/server.mjs';
-import { links, loadPdf, namedDestinations, readOutline } from './pdf';
+import { links, loadPdf, namedDestinations, readOutline, type Outline } from './pdf';
 
 const TITLES: Record<string, string> = {
   100: 'Test Home',
@@ -58,6 +58,16 @@ async function exportAndRead(ext: ExtensionHarness, request: ExportRequest, page
 }
 
 const outlineTitles = (o: { title: string }[]) => o.map((i) => i.title);
+
+type PageTree = [string, PageTree[]];
+/** The page bookmarks of an outline (heading bookmarks of each page left out), nested. */
+function pageTree(items: Outline[], titles: Iterable<string>): PageTree[] {
+  const set = new Set(titles);
+  const walk = (list: Outline[]): PageTree[] =>
+    list.flatMap((it): PageTree[] => (set.has(it.title) ? [[it.title, walk(it.children)]] : walk(it.children)));
+  return walk(items);
+}
+const flatTitles = (items: Outline[]): string[] => items.flatMap((i) => [i.title, ...flatTitles(i.children)]);
 
 test('(a) current page → one PDF: metadata, outline, anchors, images, read-only same-origin traffic', async ({ ext, cloud }) => {
   const source = await ext.openPage(cloud.url('/spaces/TEST/pages/103/Architecture+Overview'));
@@ -131,7 +141,7 @@ test('(b) subtree → tree order, 403 page skipped, 429 retried, archived exclud
   expect(job.pages.map((p) => p.id)).toEqual(['101', '102', '105', '103', '104']);
   expect(job.pages.map((p) => p.depth)).toEqual([0, 1, 2, 1, 1]);
   expect(job.errors).toEqual([expect.objectContaining({ pageId: '104', severity: 'skipped' })]);
-  expect(job.warnings?.join(' ')).toMatch(/archived or draft/);
+  expect(job.warnings?.join(' ')).toMatch(/1 archived item was excluded/);
   expect(job.message).toMatch(/1 page skipped/);
   // 429 + Retry-After on "Getting Started" was retried.
   const bodies102 = cloud.log.filter((r) => r.path.startsWith('/wiki/api/v2/pages/102?body-format=export_view'));
@@ -141,8 +151,13 @@ test('(b) subtree → tree order, 403 page skipped, 429 retried, archived exclud
   const pdf = await loadPdf(file.bytes);
   expect(pdf.getTitle()).toBe('Engineering Handbook');
   expect(pdf.getSubject()).toContain('4 pages');
+  // Bookmarks follow the page tree (each page also keeps its own heading bookmarks).
   const outline = readOutline(pdf);
-  expect(outlineTitles(outline)).toEqual(['Engineering Handbook', 'Getting Started', 'Local Setup', 'Architecture Overview']);
+  expect(pageTree(outline, Object.values(TITLES))).toEqual([
+    ['Engineering Handbook', [['Getting Started', [['Local Setup', []]]], ['Architecture Overview', []]]],
+  ]);
+  const arch = outline[0]!.children.find((c) => c.title === 'Architecture Overview')!;
+  expect(outlineTitles(arch.children)).toEqual(['Components', 'Data model']);
   const dests = namedDestinations(pdf);
   for (const id of ['101', '102', '105', '103']) expect(dests).toContain(`p-${id}`);
   expect(dests).not.toContain('p-104');
@@ -169,7 +184,7 @@ test('(c) folder → folder header + its pages in sidebar order', async ({ ext, 
   expect(job.errors).toEqual([]);
   expect(job.result!.filename).toBe(`TEST_Design Docs_${today()}.pdf`);
   const pdf = await loadPdf(file.bytes);
-  expect(outlineTitles(readOutline(pdf))).toEqual(['Design Docs', 'API Design', 'UI Guidelines']);
+  expect(pageTree(readOutline(pdf), Object.values(TITLES))).toEqual([['Design Docs', [['API Design', []], ['UI Guidelines', []]]]]);
   expect(pdf.getSubject()).toContain('2 pages');
 });
 
@@ -187,7 +202,11 @@ test('(d) linked pages, depth 1 → root + each linked page once, unreadable lin
   // "Release Notes" has an attachment that 404s: placeholder, reported as degraded (not fatal).
   expect(job.errors).toEqual([expect.objectContaining({ title: 'Images', severity: 'degraded', message: expect.stringMatching(/^1 image could not be loaded/) })]);
   const pdf = await loadPdf(file.bytes);
-  expect(outlineTitles(readOutline(pdf))).toEqual(['Architecture Overview', 'Getting Started', 'Release Notes', 'API Design']);
+  expect(pageTree(readOutline(pdf), Object.values(TITLES))).toEqual([
+    ['Architecture Overview', [['Getting Started', []], ['Release Notes', []], ['API Design', []]]],
+  ]);
+  // The preview could tell same-titled pages apart: linked pages carry their breadcrumb.
+  expect(job.pages.find((p) => p.id === '102')?.breadcrumb).toEqual(['Test Home', 'Engineering Handbook']);
   const l = links(pdf);
   expect(l.dests).toEqual(expect.arrayContaining(['p-102', 'p-106', 'p-501']));
   const dests = namedDestinations(pdf);
@@ -263,7 +282,7 @@ test('(g) preview page: lists the tree, unchecking a page leaves it out, Export 
 
   const rows = preview.locator('ul.rows .row-title');
   await expect(rows).toHaveText(['Engineering Handbook', 'Getting Started', 'Local Setup', 'Architecture Overview', 'Secret Plans']);
-  await expect(preview.getByText(/archived or draft item/)).toBeVisible();
+  await expect(preview.getByText(/archived item was excluded/)).toBeVisible();
 
   await preview.locator('li', { hasText: 'Local Setup' }).locator('input[type="checkbox"]').first().uncheck();
   await expect(preview.getByText('4 pages selected')).toBeVisible();
@@ -277,7 +296,9 @@ test('(g) preview page: lists the tree, unchecking a page leaves it out, Export 
   await expect(preview.getByText(job.result!.filename)).toBeVisible();
 
   const pdf = await loadPdf((await ext.download(job.result!.downloadId!)).bytes);
-  expect(outlineTitles(readOutline(pdf))).toEqual(['Engineering Handbook', 'Getting Started', 'Architecture Overview']);
+  expect(pageTree(readOutline(pdf), Object.values(TITLES))).toEqual([
+    ['Engineering Handbook', [['Getting Started', []], ['Architecture Overview', []]]],
+  ]);
 });
 
 test('(g2) popup: probes the active Confluence tab and exports "This page"', async ({ ext, cloud }) => {
@@ -314,7 +335,9 @@ test('(h) Data Center (/confluence, v1 only): subtree export in sidebar order', 
   expect(job.errors).toEqual([]);
   expect(job.result!.filename).toBe(`DOC_DC Home_${today()}.pdf`);
   const pdf = await loadPdf(file.bytes);
-  expect(outlineTitles(readOutline(pdf))).toEqual(['DC Home', 'DC Child B', 'DC Grandchild', 'DC Child A']);
+  expect(pageTree(readOutline(pdf), ['DC Home', 'DC Child B', 'DC Grandchild', 'DC Child A'])).toEqual([
+    ['DC Home', [['DC Child B', [['DC Grandchild', []]]], ['DC Child A', []]]],
+  ]);
   expect(pdf.getAuthor()).toBe('Dana Datacenter');
   // Link from the home page to an exported page (DC /display/ URL) became an internal link.
   expect(links(pdf).dests).toContain('p-2003');
@@ -374,8 +397,9 @@ test('(j) live render: the real page is printed and inserted after its header, n
   // The inserted sheets come from the real page after its script drew the diagram.
   expect(links(pdf).uris).toContain('https://live.example/rendered-diagram');
   expect(outlineTitles(readOutline(pdf))[0]).toBe('System Diagram');
-  // Several prints were combined: Chrome's footer was off and pdf-lib stamped page numbers.
-  // (The cover is numbered too, like Chrome's own footer does: known limitation, ARCHITECTURE §5.)
+  // Several prints were combined: Chrome's footer was off and pdf-lib stamped page numbers,
+  // on every sheet but the cover.
+  expect(hasStampFont(pdf, 0), 'cover not numbered').toBe(false);
   for (let i = 1; i < pdf.getPageCount(); i++) expect(hasStampFont(pdf, i), `sheet ${i + 1} stamped`).toBe(true);
   // No live-render tab left behind.
   const tabs = (await ext.driver.evaluate(() => chrome.tabs.query({}))) as chrome.tabs.Tab[];
@@ -400,11 +424,21 @@ test('(k) more pages than the print batch size → batches merged, bookmarks and
     expect(job.errors).toEqual([]);
     const pdf = await loadPdf(file.bytes);
     expect(pdf.getPageCount()).toBe(job.result!.sheetCount);
-    expect(outlineTitles(readOutline(pdf))).toEqual(titles);
+    expect(pageTree(readOutline(pdf), titles)).toEqual([['Big Manual', titles.slice(1).map((t): PageTree => [t, []])]]);
     const dests = namedDestinations(pdf);
     for (let id = 600; id <= 612; id++) expect(dests).toContain(`p-${id}`);
-    // Every remaining internal link still resolves after merging.
-    for (const d of links(pdf).dests) expect(dests).toContain(d);
+    // TOC entries and links to pages printed in the second batch survive the merge, and every
+    // internal link resolves to the real section (not to a placeholder in the first batch).
+    const l = links(pdf);
+    for (const id of [610, 611, 612]) expect(l.dests).toContain(`p-${id}`);
+    for (const d of l.dests) expect(dests).toContain(d);
+    const lastSheet = pdf.getPageCount() - 1;
+    const destPage = (name: string) => {
+      const arr = (pdf.catalog.lookup(PDFName.of('Dests')) as PDFDict).lookup(PDFName.of(name)) as PDFArray;
+      return pdf.getPages().findIndex((p) => p.ref === arr.get(0));
+    };
+    expect(destPage('p-612')).toBe(lastSheet);
+    expect(destPage('p-610')).toBeLessThan(destPage('p-611'));
     for (let i = 1; i < pdf.getPageCount(); i++) expect(hasStampFont(pdf, i), `sheet ${i + 1} stamped`).toBe(true);
   } finally {
     await ext.driver.evaluate(() => chrome.storage.sync.remove('settings'));
@@ -418,8 +452,8 @@ test('(l) entire space → every root and descendant in sidebar order, titled af
     cloudRequest(cloud, { mode: 'space', depth: 'all', root: { id: '100', type: 'page', title: 'Test Home', spaceId: '9001' } }),
   );
   const ids = job.pages.map((p) => p.id);
-  expect(ids.slice(0, 11)).toEqual(['100', '101', '102', '105', '103', '104', '106', '108', '500', '501', '502']);
-  expect(ids.slice(11)).toEqual(Array.from({ length: 13 }, (_, i) => String(600 + i)));
+  expect(ids.slice(0, 12)).toEqual(['100', '101', '102', '105', '103', '104', '106', '108', '109', '500', '501', '502']);
+  expect(ids.slice(12)).toEqual(Array.from({ length: 13 }, (_, i) => String(600 + i)));
   expect(job.errors).toEqual([
     expect.objectContaining({ pageId: '104', severity: 'skipped' }),
     expect.objectContaining({ title: 'Images', severity: 'degraded' }),
@@ -427,7 +461,10 @@ test('(l) entire space → every root and descendant in sidebar order, titled af
   expect(job.result!.filename).toBe(`TEST_Test Space_${today()}.pdf`);
   const pdf = await loadPdf(file.bytes);
   expect(pdf.getTitle()).toBe('Test Space');
-  expect(readOutline(pdf).length).toBe(ids.length - 1);
+  // One bookmark per exported page (the skipped one has none), nested under the space home.
+  const exported = job.pages.filter((p) => p.id !== '104').map((p) => p.title);
+  expect(flatTitles(readOutline(pdf)).filter((t) => exported.includes(t))).toEqual(exported);
+  expect(outlineTitles(readOutline(pdf))).toEqual(['Test Home']);
 });
 
 test('(m) manual selection: pages from different branches come out in tree order', async ({ ext, cloud }) => {
@@ -466,8 +503,10 @@ test('(n) two exports at the same time → both finish with the right content', 
   const [ja, jb] = await Promise.all([ext.waitForJob(a), ext.waitForJob(b)]);
   expect([ja.status, jb.status], `${ja.message} / ${jb.message}`).toEqual(['done', 'done']);
   const [fa, fb] = await Promise.all([ext.download(ja.result!.downloadId!), ext.download(jb.result!.downloadId!)]);
-  expect(outlineTitles(readOutline(await loadPdf(fa.bytes)))).toEqual(['Engineering Handbook', 'Getting Started', 'Local Setup', 'Architecture Overview']);
-  expect(outlineTitles(readOutline(await loadPdf(fb.bytes)))).toEqual(['Design Docs', 'API Design', 'UI Guidelines']);
+  expect(pageTree(readOutline(await loadPdf(fa.bytes)), Object.values(TITLES))).toEqual([
+    ['Engineering Handbook', [['Getting Started', [['Local Setup', []]]], ['Architecture Overview', []]]],
+  ]);
+  expect(pageTree(readOutline(await loadPdf(fb.bytes)), Object.values(TITLES))).toEqual([['Design Docs', [['API Design', []], ['UI Guidelines', []]]]]);
   await expect.poll(() => ext.workerTabUrls(), { timeout: 3000 }).toEqual([]);
   expect(await ext.debuggerAttachedTabs()).toEqual([]);
 });
@@ -481,7 +520,67 @@ test('(g3) popup multi-page mode → page count, then the preview tab opens with
   await popup.getByRole('radio', { name: 'This page + children' }).check();
   const previewButton = popup.getByRole('button', { name: /^Preview/ });
   await expect(previewButton).toHaveText(/Preview \(5 pages\)/);
+  const listings = () => cloud.log.filter((r) => r.path.startsWith('/wiki/api/v2/pages/101/descendants')).length;
+  const counted = listings();
   const [preview] = await Promise.all([ext.context.waitForEvent('page'), previewButton.click()]);
   await preview.waitForURL(/preview\.html\?req=/);
   await expect(preview.locator('ul.rows .row-title')).toHaveText(['Engineering Handbook', 'Getting Started', 'Local Setup', 'Architecture Overview', 'Secret Plans']);
+  // The preview reused the popup's collection instead of listing the tree again.
+  expect(listings()).toBe(counted);
+  // FR-7: rows carry their breadcrumb (shown, and searchable, when the list is filtered).
+  await preview.getByLabel('Filter pages by title').fill('Getting Started');
+  await expect(preview.locator('ul.rows li', { hasText: 'Local Setup' }).locator('.row-crumb')).toHaveText(
+    'Test Home › Engineering Handbook › Getting Started',
+  );
+});
+
+test('(o) hostile export_view: no injection vector runs in the worker tab, no foreign requests', async ({ ext, cloud }) => {
+  await ext.openPage(cloud.url('/spaces/TEST/pages/100/Test+Home'));
+  const foreign: string[] = [];
+  const onRequest = (r: Request) => {
+    const u = r.url();
+    if (!u.startsWith(cloud.origin) && !/^(chrome-extension|data|blob):/.test(u)) foreign.push(u);
+  };
+  ext.context.on('request', onRequest);
+  const { job, file } = await exportAndRead(ext, cloudRequest(cloud, { mode: 'current', root: { id: '109', type: 'page', title: 'Hostile Page' } }));
+  ext.context.off('request', onRequest);
+  // Give any deferred payload (timers, focus, toggle events) a moment to fire.
+  await new Promise((r) => setTimeout(r, 500));
+  expect(cloud.log.filter((r) => r.path.includes('__pwned'))).toEqual([]);
+  expect(foreign).toEqual([]);
+  expect(job.status).toBe('done');
+  const pdf = await loadPdf(file.bytes);
+  expect(pdf.getPageCount()).toBeGreaterThanOrEqual(2);
+  expect(links(pdf).uris.filter((u) => /^\s*(java\s*script|data):/i.test(u))).toEqual([]);
+});
+
+test('(p) session expires mid-export → clear sign-in error, no file', async ({ ext, cloud }) => {
+  await ext.openPage(cloud.url('/spaces/TEST/pages/600/Big+Manual'));
+  cloud.config.delayMs = 1500; // slow bodies: the first ones are in flight when the session ends
+  const jobId = await ext.startJob(cloudRequest(cloud, { mode: 'subtree', depth: 'all', root: { id: '600', type: 'page', title: 'Big Manual' } }));
+  await ext.waitForJob(jobId, ['fetching'], 30_000);
+  await ext.context.clearCookies();
+  const job = await ext.waitForJob(jobId);
+  expect(job.status).toBe('error');
+  expect(job.message).toMatch(/session has expired|sign in/i);
+  expect(job.result).toBeUndefined();
+  // Not reported as a pile of per-page "no permission" errors.
+  expect(job.errors.filter((e) => /permission/i.test(e.message))).toEqual([]);
+  await expect.poll(() => ext.workerTabUrls(), { timeout: 3000 }).toEqual([]);
+});
+
+test('(r) preview: collecting can be cancelled, and closing the preview closes its helper tab', async ({ ext, cloud }) => {
+  await ext.openPage(cloud.url('/spaces/TEST/pages/101/Engineering+Handbook'));
+  cloud.config.delayMs = 1500;
+  const request = cloudRequest(cloud, { mode: 'linked', linkDepth: 1, root: { id: '103', type: 'page', title: TITLES[103] } });
+  const preview = await ext.context.newPage();
+  await preview.goto(ext.url(`preview.html?req=${encodeRequestParam(request)}`));
+  await preview.getByRole('button', { name: 'Cancel' }).click();
+  await expect(preview.getByText('Collecting pages was cancelled.')).toBeVisible();
+  cloud.config.delayMs = 0;
+  await preview.getByRole('button', { name: 'Retry' }).click();
+  await expect(preview.locator('ul.rows .row-title').first()).toHaveText('Architecture Overview');
+  expect((await ext.workerTabUrls()).length).toBeGreaterThanOrEqual(1);
+  await preview.close();
+  await expect.poll(() => ext.workerTabUrls(), { timeout: 15_000 }).toEqual([]);
 });

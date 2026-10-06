@@ -81,10 +81,10 @@ not `browser.*`.
 | Context | File | Role |
 |---|---|---|
 | Service worker | `entrypoints/background.ts` → `lib/job/*`, `lib/render/*`, `lib/pdf/*`, `lib/download.ts` | Orchestrator: job state machine, worker/live tabs, `chrome.debugger` printing, pdf-lib post-processing, downloads, notifications, context menus, keyboard command, permission-grant follow-up. **No DOM** (no DOMParser, no URL.createObjectURL). |
-| Worker tab content script | `entrypoints/worker.ts` (unlisted script → `/worker.js`) | Injected with `chrome.scripting.executeScript({files:['/worker.js']})` into a background tab opened on `{base}/rest/api/space?limit=1`. RPC server for `SwToWorker`. Does **all Confluence API calls** (same-origin, cookies) via `lib/confluence/*`, keeps fetched HTML in memory, and **assembles the print document into its own DOM** via `lib/assemble/*`. The SW then prints this tab. |
+| Worker tab content script | `entrypoints/worker.ts` (unlisted script → `/worker.js`) | Injected with `chrome.scripting.executeScript({files:['/worker.js']})` into a background tab opened on `{base}/rest/api/space?limit=1#cfp-worker`. RPC server for `SwToWorker`. Does **all Confluence API calls** (same-origin, cookies) via `lib/confluence/*`, keeps fetched HTML in memory (plus a bounded LRU of page bodies shared by the preview's collection and the export's fetch), and **assembles the print document into its own DOM** via `lib/assemble/*`. The SW then prints this tab. Long operations (`worker/collect`, `worker/fetch`) run in the background and report their outcome with a `worker/done` notification (see §5 Service-worker lifetime). |
 | Live render script | `entrypoints/live.ts` (unlisted → `/live.js`) | Injected into real Confluence page tabs for FR-10: expand macros, hide app chrome, wait for macro render, answer `live/prepare`. |
 | Popup | `entrypoints/popup/` | Probe active tab (activeTab + `executeScript({func: probePage})`), mode picker, request site permission, start "This page" export, open preview for multi-page modes. |
-| Preview tab | `entrypoints/preview/` (`/preview.html?req=<base64url JSON ExportRequest>`) | FR-6 tree picker, FR-7 preview & pruning, FR-12 progress / cancel / error summary, FR-16 large-export guard. Keeps the SW alive while open. |
+| Preview tab | `entrypoints/preview/` (`/preview.html?req=<base64url JSON ExportRequest>`) | FR-6 tree picker, FR-7 preview & pruning (with breadcrumbs), FR-12 progress / cancel / error summary, FR-16 large-export guard. Collects pages over a UI port (`UI_PORT_NAME`, `components/collectClient.ts`): progress, "Throttled by Confluence, retrying…" and Cancel; closing the page cancels its collection and closes the idle helper tab. |
 | Options | `entrypoints/options/` | Settings (lib/settings.ts), site access management (lib/permissions.ts). |
 | Offscreen document | `entrypoints/offscreen/` (`/offscreen.html`) | Turns bytes into `blob:` URLs for `chrome.downloads` (`SwToOffscreen`). |
 
@@ -95,34 +95,58 @@ Shared code lives in `lib/`; shared Preact components in `components/`; UI CSS i
 1. **Detect** (popup): `probePage()` → `ProbeResult` (site, kind, id, spaceKey, title, lastUpdated, user).
 2. **Permission**: `requestSiteAccess(origin)` inside the click handler (user gesture). The popup
    may close while Chrome shows the prompt; therefore the popup first stores the intended action
-   in `chrome.storage.session` under `pendingStart` and the SW starts it on
-   `chrome.permissions.onAdded` if the origin matches (and clears it).
-3. **Worker tab**: SW `openWorkerTab(site, nearTabId)` → inactive tab at the end of the source
-   window, URL `{base}/rest/api/space?limit=1`, waits for `complete`, injects `/worker.js`,
-   pings until ready. `waitForTabComplete` also polls `tabs.get`: a lazily added `onUpdated`
-   listener can miss a fast page's `complete` while `tabs.get` still answers `loading` (seen in
-   real Chrome on the first export after the service worker started). One worker tab per job; also used by the preview for collect/tree.
-4. **Collect** (worker): `collect(client, request)` → ordered, de-duplicated `PageRef[]`.
-5. **Preview** (multi-page): user prunes; FR-16 thresholds (`warnPageCount`, `confirmPageCount`, managed `maxPages`).
-6. **Fetch** (worker): `fetchPages` pool (settings.apiConcurrency), 429 back-off, per-page
-   `FetchedPageInfo` (permission errors → skipped, never fatal). Detect `needsLiveRender`.
-7. **Assemble + print**, in batches of `settings.printBatchSize` pages (normally one batch):
-   worker builds cover (first batch only) + TOC (first batch, lists *all* pages) + page sections →
-   waits for images/fonts → SW `printTabToPdf(workerTabId, printParams)`.
+   in `chrome.storage.session` under `pendingStart` (TTL 90 s). The export is started exactly once
+   through `manager.claimPendingStart(pending)`: both `chrome.permissions.onAdded` (SW) and the
+   popup (`job/claimPending`, when it is still open after the grant) go through it, and the claim,
+   keyed by `pending.createdAt`, is registered synchronously before any await. Every other
+   permission request (preview "Allow & export", options "Add site") first clears `pendingStart`
+   (fire-and-forget, keeps the user gesture), so an old, denied popup request never starts on an
+   unrelated grant. The context menu never prompts (see §5 Permissions).
+3. **Worker tab**: SW `openWorkerTab(site, nearTabId, signal)` → inactive tab at the end of the
+   source window, URL `{base}/rest/api/space?limit=1#cfp-worker`, waits for `complete`, injects
+   `/worker.js`, pings until ready. `waitForTabComplete` also polls `tabs.get`: a lazily added
+   `onUpdated` listener can miss a fast page's `complete` while `tabs.get` still answers `loading`
+   (seen in real Chrome on the first export after the service worker started). One worker tab per
+   job; the preview's cached helper tab (per site and profile: incognito tabs get their own) is
+   handed over to the job when idle. A cancel while the tab is still opening closes it: the
+   signal is passed down, and the runner also closes whatever tab the pending open resolves to.
+4. **Collect** (worker, background op): `collect(client, request)` → ordered, de-duplicated
+   `PageRef[]`, each with its breadcrumb. "This page" needs no collection (`currentPageRef()`).
+5. **Preview** (multi-page): collection over the UI port (cancellable, progress and throttling
+   shown; a result collected moments ago for the same request — the popup's page count — is
+   reused for 90 s); user prunes; FR-16 thresholds (`warnPageCount`, `confirmPageCount`, managed
+   `maxPages`) count pages, not folder rows.
+6. **Fetch** (worker, background op): pool (settings.apiConcurrency), 429 back-off, per-attempt
+   timeouts, per-page `FetchedPageInfo` (permission errors → skipped, never fatal). One request per
+   page on Cloud (v2 export_view; space key, author and breadcrumb from cached lookups). A 401
+   (or a network failure) triggers one session check (`/rest/api/user/current`); a signed-out
+   session aborts the fetch with one sign-in error instead of N "no permission" skips. Detect
+   `needsLiveRender`.
+7. **Assemble + print**, in batches of `settings.printBatchSize` pages (normally one batch, max
+   400): worker builds cover (first batch only) + TOC (first batch, lists *all* pages, levels from
+   the full page list so children of a skipped page take its place) + page sections + zero-size
+   `p-{id}` targets for pages printed in other batches → waits for images/fonts → SW prints with
+   one debugger session for the whole job (`createPrintSession`).
    Live-render pages appear as header-only sections containing a `.cf-live-slot` marker.
 8. **Live render** (if enabled and any page flagged): `liveRenderPages()` prints each flagged
-   page from its real URL (pool of `liveRenderConcurrency` tabs).
-9. **Post-process** (SW, pdf-lib): concatenate batch PDFs; for each live page, insert its pages
-   right after that page's header sheet (located via named destination `p-{id}`, see §5);
-   build outline (bookmarks) when Chrome's outline is unavailable or pages were inserted;
-   set metadata (Title, Author, Subject, Creator, Producer, Keywords).
-   `separateFiles` (FR-11): print each page as its own document (no cover/TOC), zip with fflate.
-10. **Download**: `saveBytes(bytes, filename, mime)` via offscreen blob URL + `chrome.downloads.download`
-    (no `saveAs` → respects the user's Chrome "Ask where to save" setting). Close worker/live tabs,
-    detach debugger (always in `finally`), notification, badge cleared.
+   page from its real URL (`#cfp-live`, pool of `liveRenderConcurrency` tabs). The page's own
+   title and byline are hidden (the header sheet already has them).
+9. **Post-process** (SW, pdf-lib): `concatPdfs(parts, owner)` (a destination defined by several
+   batches resolves to the batch holding the real section); `finalizeExport()` parses the result
+   once: locates sections (`p-{id}`, §5), inserts live pages right after their header sheet,
+   writes the bookmarks as the page tree with each page's heading bookmarks from Chrome's outline,
+   stamps "n / N" when needed (§5 Page numbers), sets metadata (Title, Author, Subject, Creator,
+   Producer, Keywords). Every step is wrapped in `abortable()`; buffers are released before saving.
+   `separateFiles` (FR-11): print each page as its own document (no cover/TOC), zip with fflate's
+   streaming `Zip` (one file at a time, yielding in between — fflate's async API needs Workers).
+10. **Download**: `saveBytes(bytes, filename, mime, signal)` via offscreen blob URL +
+    `chrome.downloads.download` (no `saveAs` → respects the user's Chrome "Ask where to save"
+    setting). It waits for a final download state without a timeout; a cancel cancels (and erases)
+    the download. Close worker/live tabs, detach debugger (always in `finally`), notification,
+    badge cleared.
 
-Cancel: SW aborts its AbortController, sends `worker/cancel`, detaches debugger, closes tabs,
-status `cancelled` within 2 s.
+Cancel: SW aborts its AbortController, sends `worker/cancel`, detaches debugger, cancels a pending
+download, closes tabs, status `cancelled` within 2 s.
 
 ## 4. Module contracts (exact exports — implement these signatures)
 
@@ -164,8 +188,10 @@ export function isSameSite(url: string, site: SiteInfo): boolean;
 
 // http.ts — same-origin GET only. credentials:'include', Accept: application/json.
 export class HttpError extends Error { status: number; url: string; }
-export interface HttpOptions { signal?: AbortSignal; onThrottle?: (retryInMs: number) => void; maxRetries?: number /*3*/; }
-export function getJson<T>(url: string, opts?: HttpOptions): Promise<T>;   // retries 429/502/503/504 with Retry-After + exp backoff + jitter
+export interface HttpOptions { signal?: AbortSignal; onThrottle?: (retryInMs: number) => void; maxRetries?: number /*3*/;
+  timeoutMs?: number /*60 s until headers*/; bodyTimeoutMs?: number /*180 s for the body*/; }
+export function getJson<T>(url: string, opts?: HttpOptions): Promise<T>;   // retries 429/502/503/504 with Retry-After + exp backoff + jitter;
+//   a timed-out attempt is retried once like a network error, then HttpError(0, 'request timed out')
 export function getText(url: string, opts?: HttpOptions): Promise<string>;
 /** Follows v2 `_links.next` and v1 `_links.next`/`start`+`limit`; yields `results[]` items. */
 export function paginate<T>(firstUrl: string, site: SiteInfo, opts?: HttpOptions): AsyncGenerator<T>;
@@ -188,28 +214,42 @@ export interface SpaceSummary { id?: string; key: string; name: string; homepage
 export interface ConfluenceClient {
   readonly site: SiteInfo;
   getContent(id: string, type?: ContentType): Promise<ContentSummary>;
-  getChildren(parent: { id: string; type: ContentType }): Promise<ContentSummary[]>;             // sidebar order
-  getDescendants(parent: { id: string; type: ContentType }, maxDepth?: number): Promise<ContentSummary[]>; // DFS pre-order (tree order), depth >= 1
+  getChildren(parent: { id: string; type: ContentType }): Promise<ContentSummary[]>;             // sidebar order, one level
+  getDescendants(parent: { id: string; type: ContentType; title?: string }, maxDepth?: number,
+    opts?: { onWarning?(msg: string): void }): Promise<ContentSummary[]>; // DFS pre-order (tree order), depth >= 1;
+    // a sub-listing below the root that fails (429 after retries, 5xx, network) skips that branch + warning
   getSpace(spaceKey: string): Promise<SpaceSummary>;
   getSpaceRoots(space: { key: string; id?: string }): Promise<ContentSummary[]>;                 // top-level content of a space, sidebar order
-  getPageBody(id: string, type: ContentType): Promise<PageBody>;
+  getPageBody(id: string, type: ContentType, known?: { breadcrumb?: string[] }): Promise<PageBody>;
   getStorageBody(id: string, type: ContentType): Promise<string>;
-  findPageByTitle(spaceKey: string, title: string): Promise<ContentSummary | null>;
+  findPageByTitle(spaceKey: string, title: string, lookup?: { type?: 'page' | 'blogpost'; postingDay?: string }): Promise<ContentSummary | null>;
   getCurrentUser(): Promise<{ displayName: string } | null>;
 }
+// Caching rule (both clients): lookups are cached per client, but only successful or definitive
+// (403/404) answers; a transient failure is evicted and retried by the next call. Cloud v2
+// listings and DC v1 ancestors seed the content cache, so walking up a tree costs no requests.
 export function createClient(site: SiteInfo, http?: HttpOptions): ConfluenceClient; // picks cloud.ts or server.ts by site.flavour
-// cloud.ts: export class CloudClient implements ConfluenceClient (v2, v1/CQL fallbacks)
+// cloud.ts: export class CloudClient implements ConfluenceClient (v2, v1/CQL fallbacks). getPageBody = one v2
+//            export_view request; getChildren = `direct-children` (hasChildren unknown); blog posts by title via v1
+//            (`postingDay`); type discovery: v2 pages → v1 content (also blog posts) → folders/whiteboards/databases/embeds
 // server.ts: export class ServerClient implements ConfluenceClient (DC/Server v1: /rest/api/content/{id}?expand=…,
-//            /rest/api/content/{id}/child/page?expand=extensions.position, CQL ancestor=… for descendants)
+//            /rest/api/content/{id}/child/page?expand=extensions.position,childTypes.page,space)
 
 // links.ts
-export interface LinkTargets { ids: string[]; titles: { spaceKey?: string; title: string }[]; tinyCodes: string[] }
+export interface LinkTargets {
+  ids: string[];
+  types: Record<string, ContentType>;   // type of an id when the link tells it (no type discovery needed)
+  titles: { spaceKey?: string; title: string; type?: 'blogpost'; postingDay?: string }[];
+  tinyCodes: string[];
+}
 export function extractLinksFromExportView(html: string, site: SiteInfo, selfId: string): LinkTargets; // uses DOMParser
 export function extractLinksFromStorage(storage: string, site: SiteInfo, selfId: string): LinkTargets;
-// Ignore: same page, attachments (/download/), Jira (/browse/), people (/people/, /display/~), external, mailto.
+// Ignore: same page, attachments (/download/), Jira (/browse/), people (/people/, /display/~user with no page
+// title), external, mailto. `/display/~user/Title` is a page in a personal space and is followed.
 
 // collect.ts
-export interface CollectOptions { signal?: AbortSignal; onProgress?: (msg: string) => void; includeArchived?: boolean; }
+export interface CollectOptions { signal?: AbortSignal; onProgress?: (msg: string) => void; includeArchived?: boolean;
+  maxItems?: number; /* linked mode: stop at this many items (managed maxPages + 1, else 2,000) and warn */ }
 export function collect(client: ConfluenceClient, request: ExportRequest, opts?: CollectOptions):
   Promise<{ pages: PageRef[]; warnings: string[] }>;
 // current → [root]; subtree → root + descendants (depth limit); folder → descendants of folder
@@ -217,8 +257,10 @@ export function collect(client: ConfluenceClient, request: ExportRequest, opts?:
 // space → all space roots + their descendants; linked → root + linked pages (BFS by hop, depth 1|2,
 // visited set, title→id resolution, same-site only); selection → selectedIds ordered by tree order
 // (resolve positions via ancestors when ids come from different branches; fall back to given order).
-// Archived/draft excluded unless includeArchived. Whiteboards/databases/embeds kept as link-only refs.
-// De-duplicate by id, first occurrence wins.
+// Archived excluded unless includeArchived; drafts always excluded. Whiteboards/databases/embeds kept as
+// link-only refs. De-duplicate by id, first occurrence wins. Every PageRef carries its breadcrumb (tree modes:
+// from the parent chain; selection: from the ancestor chains; linked: cached ancestor lookups). Linked mode
+// reads storage only when export_view is empty or failed.
 
 // detect.ts — runs IN THE PAGE via chrome.scripting.executeScript({ func: probePage }).
 // MUST be fully self-contained (no imports, no module-scope helpers — they are not serialized).
@@ -252,16 +294,21 @@ export interface AssembleInput {
   pages: { ref: PageRef; body?: PageBody; info?: FetchedPageInfo; live?: boolean }[]; // in order
   allPages: PageRef[]; site: SiteInfo; options: ExportOptions;
   cover: CoverInfo | null; toc: boolean; generatedBy: string; // "Fast PDF Export for Confluence v1.0.0"
-  excludeIds?: string[]; // ids of allPages not in the final PDF (left out of TOC, links stay external)
+  excludeIds?: string[]; // ids of allPages not in the final PDF (left out of TOC, links stay external;
+                         // their children take their place in the TOC hierarchy)
 }
 export function buildPrintDocument(doc: Document, input: AssembleInput): void; // replaces doc's <head>/<body>
 // Structure: section.cf-cover, nav.cf-toc (TOC entries use divs/links, NOT headings),
-// article.cf-page#p-{id} > header.cf-page-meta > h1 + meta line, then content.
+// article.cf-page#p-{id} > header.cf-page-meta > h1 + meta line, then content. <head> has
+// <meta name="referrer" content="no-referrer"> before anything loads (embedded images on other hosts).
 // Link-only types (folder section header / whiteboard / database / embed): article with h1 + "Open in Confluence" link.
 // Live pages: header + <div class="cf-live-slot" data-page-id> (content arrives via live render).
 // Failed pages are not passed in (they are listed in the error summary instead).
 // Every document ends with a hidden `div.cf-dests` (display:none) holding `<a href="#p-{id}">` for
-// each article, so Chrome emits named destinations for every section in every print batch (§5).
+// each article, so Chrome emits named destinations for every section in every print batch (§5),
+// and with a zero-size `span.cf-xbatch#p-{id}` for each exported page printed in another batch.
+// Wide tables: `cf-wide` / `cf-wide-xl`, plus `cf-fixed` (fixed layout) only when the author's
+// column widths were kept as percentages.
 // geometry.ts (pure, shared with the SW): paperSizeMm(), effectiveMarginsMm() (bottom margin
 // raised to FOOTER_MIN_MARGIN_MM when page numbers are on) — used by buildPrintCss, toPrintParams
 // and the live-render @page rule so all printed sheets share one geometry.
@@ -281,6 +328,8 @@ export interface PrintParams { paperWidthIn: number; paperHeightIn: number; marg
 export function toPrintParams(options: ExportOptions): PrintParams;
 export function printTabToPdf(tabId: number, params: PrintParams, signal?: AbortSignal,
   hooks?: { beforePrint?(send: (method: string, params?: object) => Promise<unknown>): Promise<void> }): Promise<Uint8Array>;
+export function createPrintSession(tabId: number, signal?: AbortSignal): { print(params, hooks?): Promise<Uint8Array>; close(): Promise<void> };
+// one attach for several prints (the runner uses one session per job: one debugger infobar, no flicker per page)
 // attach debugger 1.3 → Page.printToPDF (preferCSSPageSize, printBackground, transferMode ReturnAsStream,
 // generateDocumentOutline/generateTaggedPDF when params say so; retry once without them if Chrome rejects)
 // → IO.read until eof → IO.close → ALWAYS detach in finally. Throws DebuggerUnavailableError when attach
@@ -288,7 +337,9 @@ export function printTabToPdf(tabId: number, params: PrintParams, signal?: Abort
 export class DebuggerUnavailableError extends Error {}
 export function detachAll(): Promise<void>; // used on cancel / SW startup cleanup
 // lib/render/tabs.ts
-export function openWorkerTab(site: SiteInfo, nearTabId?: number): Promise<number>; // injects /worker.js, pings
+export function openWorkerTab(site: SiteInfo, nearTabId?: number, signal?: AbortSignal): Promise<number>; // injects /worker.js, pings;
+//   closes its tab and rejects with AbortError when `signal` aborts while opening
+export function closeOrphanTabs(): Promise<number>; // recorded ids + any tab whose URL ends with #cfp-worker / #cfp-live
 export function ensureWorker(tabId: number): Promise<void>;
 export function closeTabQuietly(tabId: number | undefined): Promise<void>;
 // lib/render/liveRender.ts
@@ -298,7 +349,8 @@ export function liveRenderPages(pages: PageRef[], o: { options: ExportOptions; c
 // lib/pdf/merge.ts
 export interface OutlineItem { title: string; pageIndex: number; children: OutlineItem[] }
 export interface PdfMetadata { title: string; author?: string; subject?: string; keywords?: string[]; creator: string; producer?: string }
-export function concatPdfs(parts: Uint8Array[]): Promise<{ bytes: Uint8Array; offsets: number[] }>;
+export function concatPdfs(parts: Uint8Array[], owner?: (name: string) => number | undefined): Promise<{ bytes: Uint8Array; offsets: number[] }>;
+// copied pages lose /StructParents (no dangling tagged-PDF references); /Lang of the first part is kept
 export function findDestinationPages(pdf: Uint8Array, names: string[]): Promise<Map<string, number>>; // named dest → 0-based page index
 /** page id → first sheet of its section: `p-{id}` destinations, falling back to top-level outline titles. Used by the runner. */
 export function findSectionStartPages(pdf: Uint8Array, pages: { id: string; title: string }[]): Promise<Map<string, number>>;
@@ -309,13 +361,21 @@ export function finalizePdf(base: Uint8Array, o: {
   outline?: OutlineItem[];         // replaces any existing outline when given
   stampPageNumbers?: { bottomPt?: number; fontSizePt?: number; skipFirst?: number }; // "n / N" when Chrome's footer was off
 }): Promise<{ bytes: Uint8Array; pageCount: number }>;
-export function buildOutline(pages: PageRef[], startPage: Map<string, number>): OutlineItem[]; // nested by depth
+export function buildOutline(pages: PageRef[], startPage: Map<string, number>, headingsOf?: (id: string) => OutlineItem[]): OutlineItem[]; // nested by depth
+export function finalizeExport(base: Uint8Array, o: { metadata: PdfMetadata; pages: PageRef[]; excludeIds?: Iterable<string>;
+  live?: Map<string, Uint8Array>; stampPageNumbers?: { skipFirst?: number } }): Promise<{ bytes: Uint8Array; pageCount: number; unplacedLive: string[] }>;
+// the combined export in one parse: sections, live inserts (untagged), page-tree bookmarks + Chrome's heading bookmarks, numbers, metadata
+export function shiftPageIndex(index: number, inserts: { afterPageIndex: number; count: number }[]): number;
 // lib/pdf/zip.ts
-export function zipFiles(files: { name: string; data: Uint8Array }[]): Uint8Array; // fflate zipSync, unique names
+export function zipFiles(files: { name: string; data: Uint8Array }[], signal?: AbortSignal): Promise<Uint8Array>; // fflate streaming Zip, stored entries, unique names
 // lib/download.ts
-export function saveBytes(bytes: Uint8Array, filename: string, mime: string): Promise<number>; // downloadId
-// Resolves once the download completed; rejects with DownloadInterruptedError (code DOWNLOAD_INTERRUPTED,
-// reason e.g. USER_CANCELED) — the runner reports a dismissed "Save as" dialog as `cancelled`.
+export function saveBytes(bytes: Uint8Array, filename: string, mime: string, signal?: AbortSignal): Promise<number>; // downloadId
+// Resolves once the download completed (no timeout: a "Save as" dialog may stay open); rejects with
+// DownloadInterruptedError (code DOWNLOAD_INTERRUPTED, reason e.g. USER_CANCELED) — the runner reports a
+// dismissed "Save as" dialog as `cancelled` — or with an AbortError after cancelling + erasing the download.
+// The blob URL is revoked and the offscreen document closed only after a final state; creating/closing the
+// offscreen document is serialized, and it is never closed while another save runs.
+export function showDownloadItem(downloadId: number | undefined): Promise<boolean>; // checks downloads.search first
 ```
 
 ### lib (owned by the "orchestrator" agent; SW + shared)
@@ -331,10 +391,15 @@ export function hasSiteAccess(origin: string): Promise<boolean>;
 export function requestSiteAccess(origin: string): Promise<boolean>; // must be called from a user gesture
 export function listGrantedOrigins(): Promise<string[]>;
 export function removeSiteAccess(origin: string): Promise<boolean>;
-// lib/job/store.ts — chrome.storage.session persistence: saveJob, loadJob, listJobs, deleteJob, pendingStart get/set/clear
+// lib/job/store.ts — chrome.storage.session persistence: saveJob, loadJob, listJobs, deleteJob, pendingStart get/set/clear,
+//   saveCheckpoint/loadCheckpoint (request + compact page list, written once per job, for "Try again" after an interruption)
 // lib/job/runner.ts — export function runJob(job: ExportJobState, deps): Promise<void>; the state machine
 //   (live render runs BEFORE printing so a failed live page falls back to its static content)
-// lib/job/manager.ts — start/cancel/get/list, broadcast `job/update`, badge text, notifications
+// lib/job/workerOp.ts — runWorkerOp(): starts a background worker operation and awaits its `worker/done`,
+//   pinging the tab (a closed tab fails the operation instead of hanging it)
+// lib/job/progress.ts — jobPercent(): phase-weighted overall progress (badge, bar, tab title)
+// lib/job/manager.ts — start/cancel/get/list/retry, claimPendingStart, preview collections over the UI port (cache,
+//   cancel on disconnect), broadcast `job/update` (slim: no page list, no custom CSS), badge text, notifications
 // entrypoints/background.ts — wires onMessage (UiToSw), commands, contextMenus (FR-15), permissions.onAdded,
 //   startup cleanup (detach stale debuggers, close orphan worker tabs recorded in session storage)
 // entrypoints/worker.ts — RPC server (SwToWorker) on top of lib/confluence + lib/assemble
@@ -352,24 +417,68 @@ Talks to the SW only through `callSw()` from `lib/rpc.ts` and listens for `SwBro
 - **Section start pages**: every `article.cf-page` has `id="p-{id}"`. Chrome only emits a named
   destination for an id that some `<a href="#id">` in the same printed document targets, so each
   print batch ends with a hidden `div.cf-dests` linking every article (works without a TOC and in
-  batches 2+). `findSectionStartPages()` maps `p-{id}` → sheet index, falling back to matching
-  top-level outline titles (h1 = page title; cover/TOC use no headings). The white 1px marker text
-  `⟦cfp:{id}⟧` in each header is kept for debugging only (glyph-id text is not searchable).
-- **Outline**: Chrome's `generateDocumentOutline` (h1 = page titles, demoted content headings nest
-  under them). It survives `concatPdfs` (merged, offset) and live-page inserts (entries point at
-  page objects), so the runner only rebuilds it with `buildOutline()` when the PDF has none.
-- **Page numbers**: one batch without live pages → Chrome's footer template. Several batches or
-  inserted live pages → print without the footer and `finalizePdf({ stampPageNumbers })`; live
-  pages are then printed with the same (footer-sized) margins and `pageNumbers: false`.
+  batches 2+). Sections are located through `p-{id}`, falling back to matching top-level outline
+  titles (h1 = page title; cover/TOC use no headings). There is no hidden marker text (Chrome
+  embeds ToUnicode maps, so such text leaked into copy/paste, search and text extraction).
+- **Outline**: always written by `finalizeExport()` as the page tree (nested by depth; a page that
+  is not in the PDF is skipped and its children take its place — the TOC uses the same rule).
+  Each page's own bookmarks are the children of its h1 in Chrome's `generateDocumentOutline`
+  (demoted content headings), matched by section start sheet and title and shifted past live
+  inserts. h6 uses small caps rather than `text-transform: uppercase`, which leaked into titles.
+- **Page numbers**: one batch, no live pages and no cover → Chrome's footer template. Otherwise
+  (several batches, inserted live pages, or a cover — Chrome's footer cannot skip it) print
+  without the footer and stamp "n / N" with `skipFirst: 1` when there is a cover (the cover is
+  unnumbered, numbering starts on the TOC). Live pages are then printed with the same
+  (footer-sized) margins and `pageNumbers: false`. Geometry is the same either way
+  (`effectiveMarginsMm` keeps the footer margin).
 - **Cross-batch links** (exports > `printBatchSize` pages): Chrome drops links to ids that are not
-  in the batch being printed, so links/TOC entries to pages in another batch are lost (text kept).
-- **Service-worker lifetime**: while a job runs the manager pings `chrome.runtime.getPlatformInfo()`
-  every 20 s so silent phases (Save-as dialog, slow live renders) do not let Chrome stop the SW.
+  in the printed document, so every batch gets a zero-size `span#p-{id}` for each exported page
+  printed elsewhere (not `display:none`: Chrome needs a box). That placeholder also creates a
+  `/p-{id}` destination in the wrong batch: `concatPdfs(parts, owner)` resolves every name of the
+  form `p-{id}` / `p{id}-…` to the batch that holds page `{id}`. Heading links into another batch
+  fall back to the page (`data-cf-fallback`).
+- **Live pages** keep their header-only sheet (it carries the `p-{id}` destination, the TOC
+  target and the bookmark); the live print hides Confluence's own title and byline so they are not
+  repeated. Inserted live pages lose their tagged-PDF back-references.
+- **Service-worker lifetime**: Chrome stops an idle SW after ~30 s, and stops it regardless when a
+  single event or API call takes longer than 5 minutes. So (1) while a job or a preview collection
+  runs, or a cached helper tab waits for its idle close, the manager pings
+  `chrome.runtime.getPlatformInfo()` every 20 s; (2) long worker operations never keep one message
+  pending: `worker/collect` and `worker/fetch` answer `{ started: true }` and report the outcome
+  with `worker/done` (`lib/job/workerOp.ts`), and the preview's collection runs over a port, not as
+  one pending `runtime.onMessage` request; (3) one `Page.printToPDF` covers at most
+  `printBatchSize` ≤ 400 pages.
+- **Interrupted jobs**: if Chrome stops the SW anyway, `init()` marks running jobs as failed with
+  `interrupted: true`. Their stored checkpoint (request + compact page list) lets "Try again"
+  (`job/retry`) start the same export without collecting again. There is no resume of a
+  half-finished job (worker tab state and fetched bodies are gone).
+- **Job snapshots**: `job/update` broadcasts and `storage.session` hold a slim job (no page list —
+  `pageCount` instead — and no custom CSS), so big exports do not fill session storage; `job/get`
+  returns the full job while this SW instance knows it.
+- **Helper tabs** (worker, live render) are ordinary inactive tabs next to the source tab, not a
+  minimized window (Chrome throttles rendering there). Closing one stops the export with "An export
+  helper tab was closed, so the export stopped." Their URLs end with `#cfp-worker` / `#cfp-live`, so
+  tabs restored after a browser restart are recognized and closed. The preview's cached helper tab
+  closes 2 minutes after its last use, or 5 s after the last extension page (UI port) went away.
 - **Debugger fallback**: if `DebuggerUnavailableError`, activate the worker tab and call
   `window.print()` there (vector, but needs the print dialog) — spec §17.
 - **Permissions**: required `activeTab, scripting, storage, downloads, debugger, notifications,
   contextMenus, offscreen`; `optional_host_permissions: https://*/*, http://*/*` granted per origin.
   No `tabs` permission (not needed: we only read URLs of tabs on granted origins).
-- **Privacy**: only GET requests, only to the Confluence origin being exported; no analytics.
+  Context menu (`lib/linkPatterns.ts`): Confluence-specific link shapes on any host (`/wiki/…`,
+  `*.atlassian.net/wiki/*`, `viewpage.action`) plus the generic shapes (`/display/`, `/x/`,
+  `/spaces/`) only on granted origins; rebuilt on install/startup and when grants change. The
+  menu never asks for access: on a site without access it opens the preview, whose
+  "Allow & export" asks only after showing the site.
+- **Privacy**: the extension's own requests are GETs to the Confluence origin being exported; no
+  analytics. The worker tab loads the resources the exported pages embed (images, emoji, avatars)
+  from wherever they are referenced, which can be other hosts — disclosed in PRIVACY.md; the print
+  document sends no referrer.
 - **Managed policy** (`public/managed_schema.json`): `blockedSpaceKeys`, `disableLiveRender`,
-  `defaultOptions`, `maxPages`.
+  `defaultOptions`, `maxPages`. With a block list, a linked page whose space key is unknown
+  (pre-fetch and after the fetch) is skipped ("could not be checked against your administrator's
+  policy"); same-tree pages inherit the root's (already checked) space. `maxPages + 1` is also the
+  linked-mode collection budget, so the limit is reported without collecting far beyond it.
+- **Third-party notices**: `public/THIRD_PARTY_LICENSES.txt` (generated by
+  `scripts/generate-licenses.mjs`, checked in CI) ships with the extension and is linked from the
+  options page.

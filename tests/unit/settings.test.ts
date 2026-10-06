@@ -56,6 +56,8 @@ describe('normalizeSettings', () => {
     expect(s.defaults.marginsMm.left).toBe(0);
     expect(s.defaults.marginsMm.right).toBe(DEFAULT_OPTIONS.marginsMm.right);
     expect(s.defaults.pageNumbers).toBe(DEFAULT_OPTIONS.pageNumbers);
+    // One print must stay far below Chrome's 5-minute limit for a single debugger call.
+    expect(normalizeSettings({ printBatchSize: 2000 }).printBatchSize).toBe(400);
   });
 
   it('normalizeOptions keeps valid values', () => {

@@ -1,10 +1,11 @@
 import type { JSX } from 'preact';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { Button } from '../../components/Button';
+import { collectPages, connectUiPort, type CollectProgress } from '../../components/collectClient';
 import { errorMessage, useJob } from '../../components/hooks';
 import { Icon, Spinner } from '../../components/Icon';
 import { JobProgress } from '../../components/JobProgress';
-import { isJobActive, jobFraction, largeExportGuard, plural } from '../../components/logic';
+import { exportableCount, isJobActive, jobPageCount, jobPercent, largeExportGuard, plural } from '../../components/logic';
 import { Notice } from '../../components/Notice';
 import { OptionsForm } from '../../components/OptionsForm';
 import { PageList } from '../../components/PageList';
@@ -43,7 +44,10 @@ export function App(): JSX.Element {
   const [confirmLarge, setConfirmLarge] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [collectProgress, setCollectProgress] = useState<CollectProgress>({});
   const collectSeq = useRef(0);
+  const collectAbort = useRef<AbortController | null>(null);
+
 
   // ── bootstrap from ?req= or ?job= ──
   useEffect(() => {
@@ -78,6 +82,13 @@ export function App(): JSX.Element {
   }, []);
 
   const begin = async (req: ExportRequest, pol: ManagedPolicy = policy) => {
+    // Tell the service worker this page works on a request: when the page closes, a running
+    // collection is cancelled and the idle helper tab (tree picker, collection) is closed.
+    try {
+      connectUiPort();
+    } catch {
+      /* the service worker is restarting; collectPages() connects again */
+    }
     const applied = applyPolicy(req.options, pol);
     setRequest(req);
     setOptions(applied.options);
@@ -133,12 +144,19 @@ export function App(): JSX.Element {
 
   const collect = useCallback(async (req: ExportRequest, opts: ExportOptions, ids?: string[]) => {
     const seq = ++collectSeq.current;
+    collectAbort.current?.abort();
+    const controller = new AbortController();
+    collectAbort.current = controller;
+    setCollectProgress({});
     setStep({ kind: 'collecting' });
     try {
-      const r = await callSw({
-        type: 'collect',
-        request: { ...req, options: opts, ...(ids ? { selectedIds: ids } : {}) },
-      });
+      const r = await collectPages(
+        { ...req, options: opts, ...(ids ? { selectedIds: ids } : {}) },
+        {
+          signal: controller.signal,
+          onProgress: (p) => seq === collectSeq.current && setCollectProgress((prev) => ({ ...prev, ...p, throttledForMs: p.throttledForMs })),
+        },
+      );
       if (seq !== collectSeq.current) return;
       setPages(r.pages);
       setWarnings(r.warnings);
@@ -147,9 +165,14 @@ export function App(): JSX.Element {
       setStep({ kind: 'list' });
     } catch (e) {
       if (seq !== collectSeq.current) return;
-      setStep({ kind: 'collect-failed', message: errorMessage(e) });
+      setStep({
+        kind: 'collect-failed',
+        message: controller.signal.aborted ? 'Collecting pages was cancelled.' : errorMessage(e),
+      });
     }
   }, []);
+
+  const cancelCollect = () => collectAbort.current?.abort();
 
   // Another tab (e.g. the options page) may grant access while we wait.
   useEffect(() => {
@@ -164,6 +187,9 @@ export function App(): JSX.Element {
 
   const grant = () => {
     if (!request || !options) return;
+    // A stale popup hand-off must not start an old export on this grant (fire-and-forget: the
+    // removal is done long before Chrome reports the grant, and the user gesture is kept).
+    chrome.storage.session.remove('pendingStart').catch(() => undefined);
     // Called directly from the click: permissions.request needs the user gesture.
     requestSiteAccess(request.site.origin).then(
       (granted) => (granted ? proceed(request, options, true) : setStep({ kind: 'permission', denied: true })),
@@ -188,18 +214,25 @@ export function App(): JSX.Element {
         spaceKey: request.root.spaceKey,
         spaceId: request.root.spaceId,
         parent,
+        sourceTabId: request.sourceTabId,
       });
     },
     [request],
   );
 
   const included = useMemo(() => pages.filter((p) => !excluded.has(p.id)), [pages, excluded]);
+  // Folders are section headers, not pages: they do not count and cannot be exported alone.
+  const pageCount = exportableCount(included);
   const guard = settings
-    ? largeExportGuard(included.length, {
-        warn: settings.warnPageCount,
-        confirm: settings.confirmPageCount,
-        max: policy.maxPages,
-      })
+    ? largeExportGuard(
+        pageCount,
+        {
+          warn: settings.warnPageCount,
+          confirm: settings.confirmPageCount,
+          max: policy.maxPages,
+        },
+        included.length > 0,
+      )
     : { level: 'none' as const, message: '' };
   const canExport =
     step.kind === 'list' &&
@@ -281,6 +314,10 @@ export function App(): JSX.Element {
             history.replaceState(null, '', location.pathname);
             void begin(req);
           }}
+          onRetried={(jobId) => {
+            history.replaceState(null, '', `?job=${encodeURIComponent(jobId)}`);
+            setStep({ kind: 'job', jobId });
+          }}
         />
       ) : request && options && settings ? (
         <>
@@ -297,8 +334,20 @@ export function App(): JSX.Element {
               ) : null}
 
               {step.kind === 'collecting' ? (
-                <div class="card empty">
-                  <Spinner /> Collecting pages… this can take a moment for large trees.
+                <div class="card stack">
+                  <div class="empty">
+                    <Spinner /> {collectProgress.message || 'Collecting pages… this can take a moment for large trees.'}
+                  </div>
+                  {collectProgress.throttledForMs ? (
+                    <Notice tone="warn" compact>
+                      Throttled by Confluence, retrying in {Math.max(1, Math.ceil(collectProgress.throttledForMs / 1000))} s…
+                    </Notice>
+                  ) : null}
+                  <div class="job-actions">
+                    <Button variant="secondary" icon="x" onClick={cancelCollect}>
+                      Cancel
+                    </Button>
+                  </div>
                 </div>
               ) : null}
 
@@ -388,8 +437,13 @@ export function App(): JSX.Element {
               ) : (
                 <>
                   <span class="summary">
-                    {step.kind === 'list' ? `${plural(included.length, 'page')} selected` : ' '}
+                    {step.kind === 'list' ? `${plural(pageCount, 'page')} selected` : ' '}
                   </span>
+                  {step.kind === 'list' && guard.level === 'empty' && pages.length > 0 ? (
+                    <Notice tone="info" compact>
+                      {guard.message}
+                    </Notice>
+                  ) : null}
                   {step.kind === 'list' && (guard.level === 'warn' || guard.level === 'blocked') ? (
                     <Notice tone={guard.level === 'blocked' ? 'error' : 'warn'} compact>
                       {guard.message}
@@ -475,9 +529,11 @@ function PermissionCard({
 function JobView({
   jobId,
   onExportAgain,
+  onRetried,
 }: {
   jobId: string;
   onExportAgain: (req: ExportRequest) => void;
+  onRetried: (jobId: string) => void;
 }): JSX.Element {
   const { job, missing, loading } = useJob(jobId, 2000);
 
@@ -485,8 +541,7 @@ function JobView({
     if (!job) return;
     const name = job.request.root.title || job.request.root.spaceKey || 'Confluence';
     if (isJobActive(job.status)) {
-      const f = jobFraction(job);
-      document.title = `${f === null ? '' : `${Math.round(f * 100)}% · `}Exporting ${name}`;
+      document.title = `${job.status === 'collecting' ? '' : `${jobPercent(job)}% · `}Exporting ${name}`;
     } else {
       document.title = `${job.status === 'done' ? 'Done' : job.status === 'error' ? 'Failed' : 'Cancelled'} · ${name}`;
     }
@@ -515,7 +570,7 @@ function JobView({
         <div class="card-title">{job.request.root.title || job.request.root.spaceKey || 'Export'}</div>
         <div class="page-sub">
           {describeRequest(job.request)}
-          {job.pages.length ? ` · ${plural(job.pages.length, 'page')}` : ''}
+          {jobPageCount(job) ? ` · ${plural(jobPageCount(job), 'page')}` : ''}
         </div>
       </div>
       {missing ? (
@@ -523,7 +578,7 @@ function JobView({
           Lost contact with the export. It may have been interrupted.
         </Notice>
       ) : null}
-      <JobProgress job={job} onExportAgain={() => onExportAgain(job.request)} />
+      <JobProgress job={job} onExportAgain={() => onExportAgain(job.request)} onRetried={onRetried} />
       {isJobActive(job.status) ? (
         <p class="hint">Keep this tab open until the export finishes. Your PDF is saved to your Downloads.</p>
       ) : null}

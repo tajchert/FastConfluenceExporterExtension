@@ -6,6 +6,36 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- PDF bookmarks follow the page tree, with each page's headings below it; the TOC and the
+  bookmarks agree when a page in the middle of the tree is skipped.
+- The cover page is no longer numbered. Links and TOC entries to pages in another print batch
+  (exports over 150 pages) now work.
+- Cloud exports need one request per page instead of two; tree listings and linked-page lookups
+  need far fewer requests. Linked pages (2 hops) stop at 2,000 items (or the managed page limit).
+- Collecting pages for the preview shows progress and throttling and can be cancelled; the popup's
+  page count is reused by the preview. Rows carry breadcrumbs.
+- Drafts are never exported (also with "Include archived").
+- The context menu only appears on Confluence links (and links of allowed sites) and never asks
+  for site access itself.
+- The short name is now "Fast PDF Export". `THIRD_PARTY_LICENSES.txt` ships with the extension.
+- Privacy policy: discloses that images embedded in pages load from wherever they are hosted.
+
+### Fixed
+
+- Cancel also cancels a pending download, closes a helper tab that was still opening, and
+  interrupts post-processing; an open "Save as" dialog is no longer reported as success.
+- A permission grant can no longer start the same export twice, or start an old export.
+- A failed space or author lookup is retried instead of remembered for the whole export; with
+  blocked spaces, a linked page whose space can't be checked is skipped (fail closed).
+- One failing branch no longer aborts a whole subtree/space collection; an unanswered request
+  times out; an expired session stops the export with a sign-in message.
+- Long exports no longer risk Chrome's 5-minute limit for a single service-worker request.
+- Wide/Jira tables (right border, overlapping headers, column widths), uppercase h6 text in
+  bookmarks, hidden marker text in copy/paste, empty page-tree macros dropped silently, tagged-PDF
+  references of merged pages, and progress that jumped back to 0 %.
+
 ## [1.0.0] - 2026-10-06
 
 First public release.

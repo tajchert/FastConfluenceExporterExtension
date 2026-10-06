@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { showDownloadItem } from '../lib/download';
 import type { SwBroadcast } from '../lib/messages';
 import { callSw } from '../lib/rpc';
 import type { ExportJobState } from '../lib/types';
@@ -100,16 +101,8 @@ export async function openJobTab(jobId: string): Promise<void> {
 }
 
 /** Reveals a finished download in the OS file manager. Returns false if Chrome no longer has it. */
-export async function showDownload(downloadId: number | undefined): Promise<boolean> {
-  if (downloadId === undefined) return false;
-  try {
-    const [item] = await chrome.downloads.search({ id: downloadId });
-    if (!item || item.state === 'interrupted' || item.exists === false) return false;
-    chrome.downloads.show(downloadId);
-    return true;
-  } catch {
-    return false;
-  }
+export function showDownload(downloadId: number | undefined): Promise<boolean> {
+  return showDownloadItem(downloadId);
 }
 
 /** Shortcut configuration page for the current Chromium browser. */

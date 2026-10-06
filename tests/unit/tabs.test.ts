@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
-import { waitForTabComplete } from '../../lib/render/tabs';
+import { closeOrphanTabs, markUrl, openWorkerTab, registerOrphan, waitForTabComplete } from '../../lib/render/tabs';
+import type { SiteInfo } from '../../lib/types';
 
 describe('waitForTabComplete', () => {
   beforeEach(() => {
@@ -42,6 +43,58 @@ describe('waitForTabComplete', () => {
 
   it('rejects when the tab is gone', async () => {
     vi.spyOn(chrome.tabs, 'get').mockRejectedValue(new Error('No tab with id: 7.'));
-    await expect(waitForTabComplete(7, 2000)).rejects.toThrow(/export tab was closed/);
+    await expect(waitForTabComplete(7, 2000)).rejects.toThrow(/helper tab was closed/);
+  });
+});
+
+describe('helper tab bookkeeping', () => {
+  beforeEach(() => {
+    fakeBrowser.reset();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('markUrl replaces any fragment with the marker', () => {
+    expect(markUrl('https://x/wiki/rest/api/space?limit=1', '#cfp-worker')).toBe('https://x/wiki/rest/api/space?limit=1#cfp-worker');
+    expect(markUrl('https://x/wiki/spaces/A/pages/1#Heading', '#cfp-live')).toBe('https://x/wiki/spaces/A/pages/1#cfp-live');
+  });
+
+  it('closes recorded orphans and marked tabs restored after a browser restart', async () => {
+    await registerOrphan(3);
+    vi.spyOn(chrome.tabs, 'query').mockImplementation((async () => [
+      { id: 10, url: 'https://x/wiki/rest/api/space?limit=1#cfp-worker' },
+      { id: 11, url: 'https://x/wiki/spaces/A/pages/1#cfp-live' },
+      { id: 12, url: 'https://x/wiki/spaces/A/pages/1' },
+      { id: 13 }, // no host access: no URL
+    ]) as never);
+    const removed: number[] = [];
+    vi.spyOn(chrome.tabs, 'remove').mockImplementation((async (id: number) => {
+      removed.push(id);
+    }) as never);
+    expect(await closeOrphanTabs()).toBe(3);
+    expect(removed.sort()).toEqual([10, 11, 3]);
+  });
+
+  it('closes the worker tab it is opening when the export is cancelled', async () => {
+    const site: SiteInfo = { origin: 'https://x', baseUrl: 'https://x/wiki', contextPath: '/wiki', flavour: 'cloud' };
+    const created: string[] = [];
+    vi.spyOn(chrome.tabs, 'create').mockImplementation((async (p: chrome.tabs.CreateProperties) => {
+      created.push(p.url!);
+      return { id: 77, status: 'loading' } as chrome.tabs.Tab;
+    }) as never);
+    vi.spyOn(chrome.tabs, 'update').mockImplementation((async () => ({})) as never);
+    vi.spyOn(chrome.tabs, 'get').mockImplementation((async () => ({ id: 77, status: 'loading' })) as never);
+    const removed: number[] = [];
+    vi.spyOn(chrome.tabs, 'remove').mockImplementation((async (id: number) => {
+      removed.push(id);
+    }) as never);
+    const ac = new AbortController();
+    const p = openWorkerTab(site, undefined, ac.signal);
+    await new Promise((r) => setTimeout(r, 10));
+    ac.abort();
+    await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+    expect(created).toEqual(['https://x/wiki/rest/api/space?limit=1#cfp-worker']);
+    expect(removed).toEqual([77]);
   });
 });

@@ -243,3 +243,45 @@ describe('detachAll', () => {
     expect(mock.detach.mock.calls.map((c) => c[0])).toEqual([{ tabId: 11 }]);
   });
 });
+
+describe('createPrintSession', () => {
+  it('attaches once for several prints and detaches on close', async () => {
+    let n = 0;
+    mock.sendCommand.mockImplementation(async (_t: unknown, method: string) => {
+      if (method === 'Page.printToPDF') return { data: b64(PDF) };
+      n++;
+      return {};
+    });
+    const session = cdp.createPrintSession(5);
+    const params = cdp.toPrintParams(DEFAULT_OPTIONS);
+    await session.print(params);
+    await session.print(params);
+    await session.print(params);
+    expect(mock.attach).toHaveBeenCalledTimes(1);
+    expect(mock.detach).not.toHaveBeenCalled();
+    await session.close();
+    expect(mock.detach).toHaveBeenCalledTimes(1);
+    expect(n).toBe(0);
+    await expect(session.print(params)).rejects.toThrow(/closed/);
+  });
+
+  it('never attaches when nothing is printed, and detaches at once on abort', async () => {
+    const idle = cdp.createPrintSession(6);
+    await idle.close();
+    expect(mock.attach).not.toHaveBeenCalled();
+    expect(mock.detach).not.toHaveBeenCalled();
+
+    const ac = new AbortController();
+    mock.sendCommand.mockImplementation(async (_t: unknown, method: string) => {
+      if (method === 'Page.printToPDF') return { data: b64(PDF) };
+      return {};
+    });
+    const session = cdp.createPrintSession(7, ac.signal);
+    await session.print(cdp.toPrintParams(DEFAULT_OPTIONS));
+    ac.abort();
+    await Promise.resolve();
+    expect(mock.detach).toHaveBeenCalledWith({ tabId: 7 });
+    await expect(session.print(cdp.toPrintParams(DEFAULT_OPTIONS))).rejects.toMatchObject({ name: 'AbortError' });
+    await session.close();
+  });
+});
