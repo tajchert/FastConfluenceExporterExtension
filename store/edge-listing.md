@@ -26,8 +26,8 @@ npm run zip:edge        # → .output/*-edge.zip
 |---|---|
 | Category | Productivity |
 | Privacy policy required | Yes. The extension handles website content and the user's display name locally. Use the same URL as for Chrome ([PRIVACY.md](../PRIVACY.md)). |
-| Website | Repository URL |
-| Support contact | Repository issues URL or `<your-email>` |
+| Website | `https://github.com/tajchert/FastConfluenceExporterExtension` |
+| Support contact | `https://github.com/tajchert/FastConfluenceExporterExtension/issues` |
 | Mature content | No |
 
 ## Store listing (English)

@@ -125,8 +125,8 @@ Regenerate them with `npm run screenshots` after UI changes (see `scripts/store-
 | Field | Value |
 |---|---|
 | Official URL | *(none, or your verified domain)* |
-| Homepage URL | Repository URL, e.g. `https://github.com/<owner>/fast-confluence-exporter` |
-| Support URL | Repository issues URL, e.g. `https://github.com/<owner>/fast-confluence-exporter/issues` |
+| Homepage URL | `https://github.com/tajchert/FastConfluenceExporterExtension` |
+| Support URL | `https://github.com/tajchert/FastConfluenceExporterExtension/issues` |
 | Mature content | No |
 
 ---
@@ -221,9 +221,7 @@ Tick all three certifications:
 
 ### Privacy policy URL
 
-Host [`PRIVACY.md`](../PRIVACY.md) at a public URL, for example
-`https://github.com/<owner>/fast-confluence-exporter/blob/main/PRIVACY.md` or a GitHub Pages
-copy, and fill in the contact address placeholder before publishing.
+`https://github.com/tajchert/FastConfluenceExporterExtension/blob/main/PRIVACY.md` (the [`PRIVACY.md`](../PRIVACY.md) in this repository).
 
 ---
 

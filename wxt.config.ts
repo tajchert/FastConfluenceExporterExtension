@@ -11,6 +11,7 @@ export default defineConfig({
     short_name: '__MSG_extShortName__',
     description: '__MSG_extDescription__',
     default_locale: 'en',
+    homepage_url: 'https://github.com/tajchert/FastConfluenceExporterExtension',
     minimum_chrome_version: '120',
     icons: { 16: 'icons/16.png', 32: 'icons/32.png', 48: 'icons/48.png', 128: 'icons/128.png' },
     permissions: [

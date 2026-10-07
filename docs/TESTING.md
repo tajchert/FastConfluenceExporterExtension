@@ -78,7 +78,7 @@ node tests/e2e/mock-confluence/server.mjs 8090 cloud   # the mock on its own (or
   follow the page tree (`pageTree()` compares the page bookmarks, ignoring each page's heading
   bookmarks), internal links resolve to named destinations, skipped pages are reported, and
   **every request the extension makes goes to the mock origin and uses `GET`** (with the session
-  cookie). The fixtures embed no images from other hosts; real pages may (see PRIVACY.md §2).
+  cookie). The fixtures embed no images from other hosts; real pages may (see PRIVACY.md).
 
 What the suite covers (`tests/e2e/export.spec.ts`): (a) single page with metadata, outline,
 prefixed anchors, images and a network check; (b) subtree order, 403 skipped, 429 retried,
@@ -262,4 +262,4 @@ via `/etc/opt/chrome/policies/managed/` on Linux or a configuration profile on m
 - [ ] `manifest.json` in the ZIP: no `host_permissions` key (or an empty one), and there are no `localhost` entries (those are e2e-only).
 - [ ] The icons appear in `chrome://extensions`, in the toolbar and on the Web Store upload preview.
 - [ ] `npm audit --omit=dev --audit-level=moderate` passes (this also runs in CI).
-- [ ] `npm run check:release` passes: no `<your-email>` / `<owner>` placeholders left in `PRIVACY.md`, `README.md` or `store/*.md`, and `THIRD_PARTY_LICENSES.txt` is current (`npm run licenses`). The ZIP contains `THIRD_PARTY_LICENSES.txt`.
+- [ ] `npm run check:release` passes: no template placeholders (`<your-email>`, `<owner>`) left in `PRIVACY.md`, `README.md` or `store/*.md`, and `THIRD_PARTY_LICENSES.txt` is current (`npm run licenses`). The ZIP contains `THIRD_PARTY_LICENSES.txt`.

@@ -106,6 +106,6 @@ First public release.
   Server 7.x and newer. Site access is requested at runtime, one site at a time.
 - Enterprise managed policy: `blockedSpaceKeys`, `disableLiveRender`, `maxPages`, `defaultOptions`.
 
-[Unreleased]: https://github.com/<owner>/confluence-fast-pdf-export/compare/v1.1.0...HEAD
-[1.1.0]: https://github.com/<owner>/confluence-fast-pdf-export/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/<owner>/confluence-fast-pdf-export/releases/tag/v1.0.0
+[Unreleased]: https://github.com/tajchert/FastConfluenceExporterExtension/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/tajchert/FastConfluenceExporterExtension/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/tajchert/FastConfluenceExporterExtension/releases/tag/v1.0.0

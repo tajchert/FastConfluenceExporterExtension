@@ -5,6 +5,14 @@
   "version": "1.1.0",
   "type": "module",
   "license": "MIT",
+  "homepage": "https://github.com/tajchert/FastConfluenceExporterExtension",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tajchert/FastConfluenceExporterExtension.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tajchert/FastConfluenceExporterExtension/issues"
+  },
   "scripts": {
     "dev": "wxt",
     "dev:edge": "wxt -b edge",

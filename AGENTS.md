@@ -111,7 +111,7 @@ npm run screenshots            # regenerate store/screenshots/*.png (needs `pdft
 npm run icons                  # regenerate public/icons/*.png and store promo images
 node scripts/readme-charts.mjs # regenerate README speed charts (docs/images/*.svg) from docs/benchmarks.json
 npm run licenses               # regenerate public/THIRD_PARTY_LICENSES.txt
-npm run check:release          # placeholders + license freshness (fails until <your-email>/<owner> are filled)
+npm run check:release          # no template placeholders left + license freshness
 ```
 
 ### Running only part of the tests
@@ -965,7 +965,7 @@ and in `normalizeSettings()`. Respect policy locks (`locked` prop).
    (`npm version X.Y.Z --no-git-tag-version`; the manifest version comes from package.json).
 2. `npm run compile && npm test && npm run test:e2e && npm run test:live`.
 3. `npm run licenses` if deps changed; `npm run check:release` (placeholders must be filled:
-   contact email in `PRIVACY.md`/`store/edge-listing.md`, repo owner in `store/listing.md`).
+   none are left today; the script guards against new ones).
 4. `npm run zip` (+ `zip:edge`); upload `.output/*.zip`. Listing text: `store/listing.md`
    (permission justifications, data-usage answers), screenshots `store/screenshots/`.
 5. Expect a longer Web Store review because of the `debugger` permission.
