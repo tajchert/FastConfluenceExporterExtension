@@ -7,6 +7,7 @@
  * Outputs (all committed to the repo, so building the extension never needs this script):
  *   public/icons/icon.svg             master artwork (detailed variant)
  *   public/icons/{16,32,48,128}.png   toolbar / extensions page / store icons
+ *   store/icon-128x128.png             Web Store icon (96×96 artwork, 16 px transparent padding)
  *   store/promo-small-440x280.png     Web Store small promo tile
  *   store/marquee-1400x560.png        Web Store marquee promo tile
  *   store/edge-logo-300x300.png       Edge Add-ons store logo
@@ -88,11 +89,21 @@ function smallSvg({ id = 's' } = {}) {
 </svg>`;
 }
 
-function iconPage(svg, size) {
+/** Renders `svg` at `art`×`art` px, centered on a transparent `size`×`size` canvas. */
+function iconPage(svg, size, art = size) {
+  const pad = (size - art) / 2;
   return `<!doctype html><html><head><style>
     html,body{margin:0;padding:0;background:transparent}
-    svg{display:block;width:${size}px;height:${size}px}
+    body{padding:${pad}px}
+    svg{display:block;width:${art}px;height:${art}px}
   </style></head><body>${svg}</body></html>`;
+}
+
+// Chrome Web Store icon rule: a 128×128 PNG whose artwork is 96×96, centered, with 16 px of
+// transparent padding on each side. The artboard is cropped to the artwork's bounds first.
+const STORE_ICON_VIEWBOX = '4 9 110 110';
+function storeIconSvg() {
+  return detailedSvg({ id: 'st' }).replace('viewBox="0 0 128 128"', `viewBox="${STORE_ICON_VIEWBOX}"`);
 }
 
 // ── Promo tiles ────────────────────────────────────────────────────────────────────────────
@@ -197,10 +208,13 @@ async function main() {
     }
   };
   try {
-    for (const size of [16, 32, 48, 128]) {
+    for (const size of [16, 32, 48]) {
       const svg = size <= 32 ? smallSvg() : detailedSvg();
       await render(iconPage(svg, size), size, size, join(iconsDir, `${size}.png`), true);
     }
+    // 128: 96×96 artwork + 16 px padding (manifest icon and Web Store icon are the same file).
+    await render(iconPage(storeIconSvg(), 128, 96), 128, 128, join(iconsDir, '128.png'), true);
+    await render(iconPage(storeIconSvg(), 128, 96), 128, 128, join(storeDir, 'icon-128x128.png'), true);
     // Edge Add-ons "store logo" (1:1, 300×300 recommended).
     await render(iconPage(detailedSvg(), 300), 300, 300, join(storeDir, 'edge-logo-300x300.png'), true);
     // Store promo images must be opaque (24-bit PNG, no alpha), hence no transparent background.
