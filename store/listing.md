@@ -238,7 +238,7 @@ Tick all three certifications:
 
 "Confluence" is a trademark of Atlassian. This extension is not affiliated with or endorsed by
 Atlassian. "Confluence" in the name only describes which product the extension works with. The icon and promo images are
-original artwork (a document, a lightning bolt and a "PDF" tag) and don't use or imitate
+original artwork (a stack of pages and a round lightning badge) and don't use or imitate
 Atlassian logos or brand colors. Keep this sentence at the end of the detailed description and in
 the README.
 
